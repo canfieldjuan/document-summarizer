@@ -47,6 +47,7 @@ fn planned(
         runtime,
         &serde_json::from_value(document["synthesized"].clone()).unwrap(),
         &serde_json::from_value(document["normalized"].clone()).unwrap(),
+        None,
     )
 }
 

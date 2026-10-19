@@ -1549,3 +1549,292 @@ fn qualification_tokenizer_capture_cross_thread_and_endpoint_isolation() {
     capture_tokenizer_send("http://localhost", false);
     assert_eq!(tokenizer_observation(output.path()), observed);
 }
+
+// Test-only transport for the real native framing and preflight owners. Content
+// tokens are counts, never a completion-ready token stream. Generation is denied.
+pub(crate) struct OfflineNativeCountRuntime {
+    runtime: LlamaCppRuntime,
+    allowed: Arc<Mutex<std::collections::HashSet<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    server: Option<thread::JoinHandle<()>>,
+    validated_records: usize,
+    preflights: std::sync::atomic::AtomicUsize,
+}
+impl Drop for OfflineNativeCountRuntime {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(server) = self.server.take() {
+            server.join().unwrap();
+        }
+    }
+}
+impl OfflineNativeCountRuntime {
+    pub(crate) fn from_frozen_inventory(path: &Path, expected_sha256: &str) -> Self {
+        use crate::pipeline::qwen_tokenizer::QwenPromptTokenizer;
+        use std::io::{Read, Write};
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            expected_sha256,
+            "count inventory changed"
+        );
+        let packet: Value = serde_json::from_slice(&bytes).unwrap();
+        for receipt in packet["receipts"].as_array().unwrap() {
+            let bytes = fs::read(receipt["path"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&bytes)),
+                receipt["sha256"].as_str().unwrap(),
+                "native token receipt changed"
+            );
+        }
+        let (context, family, disable_thinking) =
+            crate::pipeline::model_settings::offline_native_count_profile("qwen35-9b-q4km-v1")
+                .unwrap();
+        let metadata = fs::read(packet["metadata_path"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&metadata)),
+            packet["metadata_sha256"].as_str().unwrap(),
+            "tokenizer metadata changed"
+        );
+        let metadata: Value = serde_json::from_slice(&metadata).unwrap();
+        let tokenizer =
+            QwenPromptTokenizer::from_model_info(family, metadata.as_object().unwrap()).unwrap();
+        let fixed = packet["fixed_framing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["content"].as_str().unwrap().to_owned(),
+                    f["tokens"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|n| u32::try_from(n.as_u64().unwrap()).unwrap())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            fixed.len(),
+            3,
+            "all fixed native frame receipts are required"
+        );
+        let records = packet["records"].as_array().unwrap();
+        assert!(
+            !records.is_empty(),
+            "recorded count inventory must not be empty"
+        );
+        let allowed = Arc::new(Mutex::new(
+            records
+                .iter()
+                .flat_map(|r| {
+                    [
+                        r["system"].as_str().unwrap().to_owned(),
+                        r["user"].as_str().unwrap().to_owned(),
+                    ]
+                })
+                .collect::<std::collections::HashSet<_>>(),
+        ));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server_stop = stop.clone();
+        let server_allowed = allowed.clone();
+        let server = thread::spawn(move || {
+            // This cache belongs only to the immutable offline test tokenizer.
+            // Repeated budget probes change output allowance, not source bytes.
+            let mut counted = HashMap::<String, u32>::new();
+            while !server_stop.load(std::sync::atomic::Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(e) => panic!("offline tokenizer fixture accept failed: {e}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let (offset, length) = loop {
+                    let mut buffer = [0; 8192];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        assert!(
+                            headers.starts_with("POST /tokenize "),
+                            "only token counting is authorized"
+                        );
+                        let length = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(|s| s.parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        assert!(length < 4 * 1024 * 1024, "unbounded offline token request");
+                        break (end + 4, length);
+                    }
+                };
+                while bytes.len() < offset + length {
+                    let mut buffer = [0; 8192];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                let body: Value = serde_json::from_slice(&bytes[offset..offset + length]).unwrap();
+                let content = body["content"].as_str();
+                let tokens = match (
+                    content,
+                    body["parse_special"].as_bool(),
+                    body["add_special"].as_bool(),
+                ) {
+                    (Some(content), Some(true), Some(false)) => fixed.get(content).cloned(),
+                    (Some(content), Some(false), Some(false))
+                        if server_allowed.lock().unwrap().contains(content) =>
+                    {
+                        let count = *counted
+                            .entry(content.to_owned())
+                            .or_insert_with(|| tokenizer.count(content).unwrap());
+                        Some(vec![0; usize::try_from(count).unwrap()])
+                    }
+                    _ => None,
+                };
+                let (status, response) = match tokens {
+                    Some(tokens) => ("200 OK", json!({"tokens":tokens}).to_string()),
+                    None => (
+                        "400 Bad Request",
+                        json!({"error":"unattributed offline token request"}).to_string(),
+                    ),
+                };
+                write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+            }
+        });
+        let mut runtime = LlamaCppRuntime::for_test(url, "offline-count-fixture".into());
+        runtime.context_tokens = context;
+        let mut result = Self {
+            runtime,
+            allowed,
+            stop,
+            server: Some(server),
+            validated_records: 0,
+            preflights: std::sync::atomic::AtomicUsize::new(0),
+        };
+        result.runtime.prompt_framing = PromptFraming::load(
+            &result.runtime.client,
+            &result.runtime.base_url,
+            &result.runtime.api_token,
+            disable_thinking,
+        )
+        .expect("every trusted native frame must have an exact recorded response");
+        for record in records {
+            let actual = result
+                .runtime
+                .prompt_tokens(
+                    record["system"].as_str().unwrap(),
+                    record["user"].as_str().unwrap(),
+                    &UNCONTROLLED_EXECUTION,
+                )
+                .unwrap()
+                .len();
+            assert_eq!(
+                actual,
+                usize::try_from(record["expected_tokens"].as_u64().unwrap()).unwrap(),
+                "recorded native token count mismatch for {}",
+                record["alias"].as_str().unwrap()
+            );
+            result.validated_records += 1;
+        }
+        result
+    }
+
+    pub(crate) fn input_tokens(&self, request: &ModelRequest) -> usize {
+        self.attribute(request);
+        self.runtime
+            .prompt_tokens(
+                &request.system_prompt,
+                &request.user_prompt,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .expect("attributed offline input must tokenize")
+            .len()
+    }
+
+    pub(crate) fn preflight_count(&self) -> usize {
+        self.preflights.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn attribute(&self, request: &ModelRequest) {
+        assert!(
+            self.validated_records > 0,
+            "native count parity must precede capacity evidence"
+        );
+        let mut allowed = self.allowed.lock().unwrap();
+        allowed.insert(request.system_prompt.clone());
+        allowed.insert(request.user_prompt.clone());
+    }
+}
+impl ModelRuntime for OfflineNativeCountRuntime {
+    fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        panic!("OFFLINE_NATIVE_COUNT_GENERATION_FORBIDDEN");
+    }
+    fn health(&self) -> Result<(), ModelRuntimeFailure> {
+        panic!("OFFLINE_NATIVE_COUNT_STARTUP_FORBIDDEN");
+    }
+    fn runtime_id(&self) -> &str {
+        "offline-native-capacity-only"
+    }
+    fn model_id(&self) -> &str {
+        "offline-native-capacity-only"
+    }
+    fn context_tokens(&self, stage: PipelineStage) -> u32 {
+        self.runtime.context_tokens(stage)
+    }
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        self.attribute(request);
+        self.preflights
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.runtime.preflight_request(request)
+    }
+}
+
+#[test]
+#[ignore = "offline only; requires frozen complete native count inventory and pinned tokenizer metadata"]
+fn offline_native_counter_matches_recorded_counts() {
+    let path = PathBuf::from(
+        std::env::var_os("DOC_SUM_OFFLINE_COUNT_INVENTORY").expect("explicit count inventory"),
+    );
+    let hash =
+        std::env::var("DOC_SUM_OFFLINE_COUNT_INVENTORY_SHA256").expect("frozen inventory hash");
+    let counter = OfflineNativeCountRuntime::from_frozen_inventory(&path, &hash);
+    for body in [
+        json!({"content":"unattributed-offline-count","parse_special":false,"add_special":false}),
+        json!({"content":"unrecorded trusted frame","parse_special":true,"add_special":false}),
+        json!({"content":"unattributed-offline-count","parse_special":false,"add_special":true}),
+        json!({"content":false,"parse_special":false,"add_special":false}),
+    ] {
+        let response = counter
+            .runtime
+            .client
+            .post(counter.runtime.endpoint("/tokenize"))
+            .json(&body)
+            .send()
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "unattributed token counts must never be guessed"
+        );
+    }
+    println!(
+        "OFFLINE_NATIVE_COUNT_PARITY records={} context={} generation_calls=0 runtime_startups=0",
+        counter.validated_records,
+        counter.context_tokens(PipelineStage::Synthesize)
+    );
+}

@@ -162,7 +162,13 @@ pub(in crate::pipeline::summary) fn verify_source_contributions(
 ) -> Result<(), PipelineFailure> {
     let mut batches = Vec::new();
     let mut required = HashSet::new();
-    for claim in &synthesized.summary_claims {
+    for (claim, verification) in synthesized.summary_claims.iter().zip(verifications.iter()) {
+        if !verification.has_valid_admission_carrier() {
+            return Err(invalid_response());
+        }
+        if verification.admission_withhold.is_some() {
+            continue;
+        }
         if !was_trimmed(claim, &synthesized.warnings) {
             continue;
         }
@@ -218,7 +224,7 @@ pub(in crate::pipeline::summary) fn verify_source_contributions(
     // same source and must not acquire a new material-coverage requirement.
     let required = required.into_iter().collect::<Vec<_>>();
     for (claim, verification) in synthesized.summary_claims.iter().zip(verifications) {
-        if was_trimmed(claim, &synthesized.warnings) {
+        if verification.admission_withhold.is_none() && was_trimmed(claim, &synthesized.warnings) {
             merge_contract_material_coverage_verdicts(
                 &required,
                 &verdicts,
@@ -356,6 +362,7 @@ mod tests {
         })
         .collect();
         let synthesized = SynthesizedDocument {
+            whole_document_progress: None,
             contract_extraction: None,
             document_id: "doc".into(),
             synthesis_version: VERSION.into(),
@@ -386,6 +393,7 @@ mod tests {
                 .summary_claims
                 .iter()
                 .map(|c| ClaimVerification {
+                    admission_withhold: None,
                     claim_id: c.claim_id.clone(),
                     evidence_ids: c.evidence_ids.clone(),
                     verdict: ClaimVerdict::Supported,

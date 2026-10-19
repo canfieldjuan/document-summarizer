@@ -6,15 +6,22 @@ use super::*;
 
 mod budget;
 pub(super) mod page_furniture;
+#[cfg(test)]
+mod readiness;
 mod semantic_support;
 mod trim;
 mod verification;
 pub(super) mod whole_clauses;
+pub(super) mod whole_document;
 pub(super) use trim::verify_source_contributions;
 pub(super) use verification::summary_verification_batches;
+pub(super) use verification::{validate_admission_records, whole_document_verification_plan};
 
 pub(super) const VERSION: &str = SYNTHESIS_VERSION;
 pub(super) const MAX_SUMMARY_CLAIMS: usize = 8;
+pub(super) const WHOLE_DOCUMENT_VERSION: &str =
+    crate::pipeline::contracts::WHOLE_DOCUMENT_SYNTHESIS_VERSION;
+const WHOLE_DOCUMENT_SCHEMA_NAME: &str = "document_general_summary_v2";
 const MODEL_OUTPUT_INVALID_WARNING_CODE: &str = "COHERENT_SUMMARY_MODEL_OUTPUT_INVALID";
 pub(super) const FALLBACK_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_CONTEXT_TOO_LARGE";
 pub(super) const SOURCE_SELECTION_WARNING_CODE: &str = "COHERENT_SUMMARY_SOURCE_SELECTION_APPLIED";
@@ -120,11 +127,20 @@ fn system_prompt(profile: SummaryProfile) -> &'static str {
     }
 }
 
-fn schema_name(profile: SummaryProfile) -> &'static str {
+fn schema_name_for_version(profile: SummaryProfile, version: &str) -> &'static str {
     match profile {
+        SummaryProfile::General if version == WHOLE_DOCUMENT_VERSION => WHOLE_DOCUMENT_SCHEMA_NAME,
         SummaryProfile::General => SCHEMA_NAME,
         SummaryProfile::Story => STORY_SCHEMA_NAME,
         SummaryProfile::Contract => CONTRACT_SCHEMA_NAME,
+    }
+}
+
+fn maximum_claims_for_schema(name: &str) -> usize {
+    if name == WHOLE_DOCUMENT_SCHEMA_NAME {
+        MAX_VERIFICATION_BATCHES
+    } else {
+        MAX_SUMMARY_CLAIMS
     }
 }
 
@@ -133,6 +149,7 @@ pub(super) fn uses_schema_name(name: &str) -> bool {
     matches!(
         name,
         SCHEMA_NAME
+            | WHOLE_DOCUMENT_SCHEMA_NAME
             | STORY_SCHEMA_NAME
             | CONTRACT_SCHEMA_NAME
             | SOURCE_SELECTION_SCHEMA_NAME
@@ -2724,6 +2741,22 @@ struct SourceCatalog {
     omitted_source_units: usize,
 }
 
+pub(super) fn partial_excerpt_evidence_ids(
+    synthesized: &SynthesizedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<HashSet<String>, PipelineFailure> {
+    if synthesized.synthesis_version != WHOLE_DOCUMENT_VERSION {
+        return Ok(HashSet::new());
+    }
+    let input = whole_document::SourceInput::new(normalized, chunked)?;
+    Ok(input
+        .evidence_contexts(&synthesized.synthesis_evidence)?
+        .into_iter()
+        .filter_map(|(id, context)| context.partial_excerpt.then_some(id))
+        .collect())
+}
+
 fn maximum_initial_summary_units_for_catalog(
     profile: SummaryProfile,
     catalog: &SourceCatalog,
@@ -3151,6 +3184,7 @@ fn synthesize_with_delivery_coverage(
         });
     }
     let result = SynthesizedDocument {
+        whole_document_progress: None,
         contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
@@ -3197,6 +3231,7 @@ fn synthesize_with_delivery_coverage(
             analyzed,
             normalized,
             generation_seed,
+            Some(chunked),
         )? {
         fallback_document(
             runtime,
@@ -4876,15 +4911,38 @@ fn summary_request(
     ordinal: u32,
     generation_seed: u64,
 ) -> ModelRequest {
+    summary_request_for_version(
+        profile,
+        VERSION,
+        user_prompt,
+        output_schema,
+        ordinal,
+        generation_seed,
+    )
+}
+
+fn summary_request_for_version(
+    profile: SummaryProfile,
+    version: &str,
+    user_prompt: &str,
+    output_schema: &Value,
+    ordinal: u32,
+    generation_seed: u64,
+) -> ModelRequest {
     ModelRequest {
         stage: PipelineStage::Synthesize,
         ordinal,
-        system_prompt: system_prompt(profile).to_string(),
+        system_prompt: if profile == SummaryProfile::General && version == WHOLE_DOCUMENT_VERSION {
+            whole_document::SYSTEM_PROMPT
+        } else {
+            system_prompt(profile)
+        }
+        .to_string(),
         user_prompt: user_prompt.to_string(),
         seed: generation_seed,
         max_output_tokens: OUTPUT_TOKENS,
         output_format: ModelOutputFormat::JsonSchema {
-            name: schema_name(profile).to_string(),
+            name: schema_name_for_version(profile, version).to_string(),
             schema: output_schema.clone(),
         },
     }
@@ -6610,6 +6668,7 @@ fn fallback_document(
         stage: Some(PipelineStage::Synthesize),
     });
     Ok(SynthesizedDocument {
+        whole_document_progress: None,
         contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.to_string(),
@@ -6651,6 +6710,7 @@ pub(super) fn saved_relation_prose_fixture(
         evidence_ids: ids,
     }];
     SynthesizedDocument {
+        whole_document_progress: None,
         contract_extraction: None,
         document_id: analyzed.document_id.clone(),
         synthesis_version: VERSION.into(),
@@ -6737,7 +6797,12 @@ fn prompt_and_schema_for_version(
             false,
         ));
     }
-    let maximum_units = maximum_initial_summary_units_for_catalog(profile, catalog);
+    let protocol = schema_name_for_version(profile, version);
+    let maximum_units = if protocol == WHOLE_DOCUMENT_SCHEMA_NAME {
+        maximum_claims_for_schema(protocol)
+    } else {
+        maximum_initial_summary_units_for_catalog(profile, catalog)
+    };
     let include_contract_clause_mapping =
         profile == SummaryProfile::Contract && required_short_contract_clauses(catalog).is_some();
     let mut clause_contexts = Vec::new();
@@ -6780,13 +6845,18 @@ fn prompt_and_schema_for_version(
             false,
         )
     })?;
+    let schema = summary_schema(catalog, maximum_units);
+    Ok((serialized, schema))
+}
+
+fn summary_schema(catalog: &SourceCatalog, maximum_units: usize) -> Value {
     let source_ids = catalog
         .candidates
         .iter()
         .map(|candidate| Value::String(candidate.request_id.clone()))
         .collect::<Vec<_>>();
     let maximum_sources = MAX_SOURCES_PER_UNIT.min(source_ids.len());
-    let schema = json!({
+    json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["units"],
@@ -6819,8 +6889,7 @@ fn prompt_and_schema_for_version(
                 }
             }
         }
-    });
-    Ok((serialized, schema))
+    })
 }
 
 #[cfg(test)]
@@ -6848,6 +6917,35 @@ fn parse_response_with_limits(
     maximum_units: usize,
     maximum_characters: usize,
 ) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
+    parse_response_for_version(
+        profile,
+        VERSION,
+        response,
+        document_id,
+        catalog,
+        maximum_units,
+        maximum_characters,
+    )
+}
+
+fn parse_response_for_version(
+    profile: SummaryProfile,
+    version: &str,
+    response: &str,
+    document_id: &str,
+    catalog: &SourceCatalog,
+    maximum_units: usize,
+    maximum_characters: usize,
+) -> Result<(Vec<CitedClaim>, Vec<EvidenceItem>), PipelineFailure> {
+    if version == WHOLE_DOCUMENT_VERSION
+        && (profile != SummaryProfile::General
+            || maximum_units == 0
+            || maximum_units > MAX_VERIFICATION_BATCHES
+            || maximum_characters == 0
+            || maximum_characters > MAX_UNIT_CHARACTERS)
+    {
+        return Err(invalid_response());
+    }
     let raw: RawResponse = serde_json::from_str(response).map_err(|_| invalid_response())?;
     if raw.units.is_empty() || raw.units.len() > maximum_units {
         return Err(invalid_response());
@@ -6946,7 +7044,7 @@ fn parse_response_with_limits(
     if profile == SummaryProfile::Contract {
         attach_contract_clause_references(&mut validated, catalog)?;
     }
-    let summary_claims = materialize_cited_claims(document_id, VERSION, validated)?;
+    let summary_claims = materialize_cited_claims(document_id, version, validated)?;
     let synthesis_evidence = catalog
         .candidates
         .iter()
@@ -7674,6 +7772,9 @@ fn source_catalog_with_furniture_policy(
     analyzed: Option<&AnalyzedDocument>,
     exclude_furniture: bool,
 ) -> Result<SourceCatalog, PipelineFailure> {
+    if synthesis_version == WHOLE_DOCUMENT_VERSION {
+        return Ok(whole_document::SourceInput::new(normalized, chunked)?.catalog);
+    }
     let furniture = exclude_furniture
         .then(|| page_furniture::Furniture::for_synthesis_version(normalized, synthesis_version));
     // Before analysis 14, coherent catalogs used v13 even for older analysis.
@@ -7848,6 +7949,34 @@ pub(super) fn validate_for_runtime(
             false,
         ));
     }
+    if synthesized.synthesis_version == WHOLE_DOCUMENT_VERSION {
+        if profile != SummaryProfile::General {
+            return Err(invalid_document());
+        }
+        validate_content(synthesized, analyzed, chunked, normalized)?;
+        let progress = synthesized
+            .whole_document_progress
+            .as_ref()
+            .ok_or_else(invalid_document)?;
+        if progress.context_tokens != runtime.context_tokens(PipelineStage::Synthesize)
+            || progress.model_profile != runtime.profile_snapshot()
+            || progress.verification_limits != comparisons::limits_for_runtime(runtime)
+        {
+            return Err(invalid_document());
+        }
+        for section in &progress.sections {
+            runtime
+                .preflight_request(&section.request)
+                .map_err(|failure| {
+                    runtime_pipeline_failure(
+                        PipelineStage::Synthesize,
+                        "MODEL_SYNTHESIS_ADMISSION",
+                        failure,
+                    )
+                })?;
+        }
+        return Ok(());
+    }
     validate_model_output_fallback_boundary(profile, synthesized)?;
     let expected = (profile == SummaryProfile::General
         && matches!(
@@ -8013,7 +8142,8 @@ pub(super) fn validate_content(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
-    if !coherent_synthesis_version_supported(&synthesized.synthesis_version)
+    if !synthesized.has_consistent_progress_role()
+        || !coherent_synthesis_version_supported(&synthesized.synthesis_version)
         || synthesized.document_id != analyzed.document_id
         || synthesized.runtime_id.trim().is_empty()
         || synthesized.model_id.trim().is_empty()
@@ -8025,6 +8155,10 @@ pub(super) fn validate_content(
             "General synthesis identity and verified-claim ledger must remain canonical",
             false,
         ));
+    }
+    if synthesized.synthesis_version == WHOLE_DOCUMENT_VERSION {
+        return whole_document::SourceInput::new(normalized, chunked)?
+            .validate_saved_synthesis(synthesized);
     }
     let supplied = synthesized
         .warnings
@@ -8276,6 +8410,7 @@ mod tests {
             warnings: vec![],
         };
         let synthesized = SynthesizedDocument {
+        whole_document_progress: None,
             contract_extraction: None,
             document_id: normalized.document_id.clone(), synthesis_version: VERSION.into(),
             runtime_id: "capture".into(), model_id: "capture".into(),
@@ -8293,7 +8428,8 @@ mod tests {
             &synthesized,
             &analyzed,
             &normalized,
-            7
+            7,
+            None
         )
         .unwrap());
         let requests = runtime.0.lock().unwrap();
@@ -11072,6 +11208,30 @@ mod tests {
             ],
             omitted_source_units: 0,
         }
+    }
+
+    #[test]
+    fn whole_document_revision_allocates_atomic_claim_capacity() {
+        let catalog = SourceCatalog {
+            candidates: (1..=MAX_VERIFICATION_BATCHES)
+                .map(|n| candidate(&format!("s{n}"), &format!("e{n}"), n as u32))
+                .collect(),
+            omitted_source_units: 0,
+        };
+        let (_, historical) =
+            prompt_and_schema_for_version(SummaryProfile::General, VERSION, &catalog).unwrap();
+        assert_eq!(historical["properties"]["units"]["maxItems"], 8);
+        let (wire, schema) =
+            prompt_and_schema_for_version(SummaryProfile::General, "15.0.0", &catalog).unwrap();
+        assert_eq!(
+            schema["properties"]["units"]["maxItems"], MAX_VERIFICATION_BATCHES,
+            "the whole-document revision must not inherit the eight-claim ceiling"
+        );
+        let wire: Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(wire["maximum_units"], MAX_VERIFICATION_BATCHES);
+        let (_, story) =
+            prompt_and_schema_for_version(SummaryProfile::Story, "15.0.0", &catalog).unwrap();
+        assert_eq!(story["properties"]["units"]["maxItems"], 8);
     }
 
     #[test]
@@ -16935,6 +17095,7 @@ mod tests {
         let mut verifications = claims
             .iter()
             .map(|claim| ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -19681,6 +19842,7 @@ mod tests {
         let mut verifications = claims
             .iter()
             .map(|claim| ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: if claim.claim_id == "already-ambiguous" {
@@ -19877,6 +20039,7 @@ mod tests {
             evidence_ids: vec![evidence[0].evidence_id.clone()],
         };
         let verification = ClaimVerification {
+            admission_withhold: None,
             claim_id: claim.claim_id.clone(),
             evidence_ids: claim.evidence_ids.clone(),
             verdict: ClaimVerdict::Supported,
@@ -19888,6 +20051,7 @@ mod tests {
         assert_eq!(length_error.code, "INVALID_VERIFICATION_RESPONSE");
 
         let mut mismatched = ClaimVerification {
+            admission_withhold: None,
             claim_id: "different-claim".into(),
             ..verification.clone()
         };
@@ -19904,6 +20068,7 @@ mod tests {
             ..claim
         };
         let mut unknown_verification = ClaimVerification {
+            admission_withhold: None,
             evidence_ids: unknown_claim.evidence_ids.clone(),
             ..verification
         };

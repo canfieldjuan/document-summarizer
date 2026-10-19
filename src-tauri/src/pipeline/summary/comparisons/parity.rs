@@ -1288,6 +1288,7 @@ fn archived_c9_verdicts_survive_relation_guard() {
             })
             .collect::<Vec<_>>();
         let mut verdicts = [ClaimVerification {
+            admission_withhold: None,
             claim_id: claims[0].claim_id.clone(),
             evidence_ids: claims[0].evidence_ids.clone(),
             verdict: decoded.verdict.clone(),

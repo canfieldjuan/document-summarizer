@@ -17,12 +17,24 @@ import ssl
 import stat
 import subprocess
 import sys
+import re
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = Path('src-tauri/src/pipeline/summary/comparisons/fixtures/c9-parity-manifest.json')
 SUMMARY_MANIFEST_PATH = Path('src-tauri/src/pipeline/summary/comparisons/fixtures/native-summary-parity-manifest.json')
 SUMMARY_MANIFEST_SHA = '5ed3e4c777eb6dd6da0f2c8cf03d3b084f11969f04e7f65ae99af11ebe8fd4cc'
+OFFLINE_MANIFEST = Path('src-tauri/src/pipeline/summary/comparisons/fixtures/whole-writer-baseline-manifest.json')
+OFFLINE_MANIFEST_SHA = 'adf2ec146f17343c967179d8b14f39107b0300729959d17b5d5973dd8389d786'
+OFFLINE_TESTS = [
+    ('counter', 'pipeline::llama_cpp::framing_tests::offline_native_counter_matches_recorded_counts', True),
+    ('dependencies', 'pipeline::summary::coherent::readiness::whole_document_dependency_frozen_source_measurement', True),
+    ('capacity', 'pipeline::summary::coherent::readiness::whole_writer_offline_native_capacity_measurement', True),
+    ('assembly', 'pipeline::summary::coherent::readiness::whole_writer_assembly_replays_the_frozen_public_candidate_packet', True),
+    ('consolidation-boundary', 'pipeline::summary::coherent::readiness::whole_writer_original_consolidation_request_still_exceeds_native_context', True),
+    ('c9', 'pipeline::summary::comparisons::tests::parity::archived_c9_verdicts_survive_relation_guard', False),
+    ('same60', 'pipeline::summary::relation_guard_precision_inventory::archived_delivery_uses_production_getters_and_validation', True),
+]
 TEST = 'pipeline::summary::comparisons::tests::parity::original_c9_production_gateway_parity'
 NATIVE_TEST = 'pipeline::llama_cpp::framing_tests::original_c9_native_framing_parity'
 EVIDENCE_ROOTS = (Path.home() / 'Desktop/codex-evidence/document-summarizer',
@@ -89,6 +101,185 @@ def tree():
     require(not command(['git', 'status', '--porcelain', '--untracked-files=all']), 'checkout must be clean')
     return {'head': command(['git', 'rev-parse', 'HEAD']),
             'files': {p: sha(REPO / p) for p in command(['git', 'ls-files']).splitlines() if (REPO / p).is_file()}}
+
+
+def offline_source():
+    source = tree()
+    # A prose-only follow-up does not invalidate exercised code. Any source,
+    # test, input, build or gate change does, including a change to this owner.
+    return {'files': {p: h for p, h in source['files'].items()
+                      if p.startswith(('src-tauri/', 'scripts/', 'src/', '.github/'))
+                      or p in ('package.json', 'package-lock.json', 'vite.config.ts')}}
+
+
+def offline_manifest():
+    require(sha(REPO / OFFLINE_MANIFEST) == OFFLINE_MANIFEST_SHA, 'offline baseline manifest changed')
+    return read(REPO / OFFLINE_MANIFEST)
+
+
+def require_exact_test_pass(log):
+    require(len(re.findall(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', log, re.M)) == 1,
+            'offline gate requires exactly one exercised passing test')
+    require('test result: FAILED' not in log, 'offline test failed')
+
+
+def verify_frozen_inputs(frozen, pins):
+    require(isinstance(frozen,dict) and set(frozen)==set(pins['inputs']), 'offline input inventory changed')
+    for name,spec in frozen.items():
+        require(spec['sha256']==pins['inputs'][name] and sha(spec['path'])==spec['sha256'], 'frozen input changed: '+name)
+    # The source packet pins the original document bytes, not just its index.
+    for source in read(frozen['source_packet']['path'])['inputs']:
+        require(sha(source['path'])==source['sha256'], 'frozen document bytes changed')
+
+
+def verify_summary_capture(packet):
+    summary=summary_manifest()
+    for name,expected in offline_manifest()['summary_capture_sources'].items():
+        require(sha(packet/name)==expected, 'summary baseline source/config changed: '+name)
+    require(sha(packet/'execution.json')==summary['execution_sha256'], 'summary execution changed')
+    for case in summary['cases']:
+        for name,expected in case['files'].items():
+            require(sha(packet/name)==expected, 'summary capture changed: '+name)
+    return summary
+
+
+def canonical_digest(value):
+    return digest_text(json.dumps(value,sort_keys=True,separators=(',',':')))
+
+
+def verify_offline_results(directory,pins):
+    require(sha(directory/'dependencies.json')==pins['dependency_report_sha256'],
+            'dependency ownership differs from the reviewed complete reference list')
+    capacity=read(directory/'capacity.json')
+    require(capacity.get('status')=='draft_planning_only','capacity is diagnostic/incomplete, not admission proof')
+    rows=capacity.get('inputs',[])
+    require(len(rows)==len(pins['writer_source_ownership']) and
+            {row['result']['alias'] for row in rows}==set(pins['writer_source_ownership']), 'missing or duplicate capacity input')
+    keys=('normalized','source_units','anchors','omitted_standalone_quote_segments')
+    for row in rows:
+        alias=row['result']['alias']
+        require(canonical_digest({k:row[k] for k in keys})==pins['writer_source_ownership'][alias],
+                'source spans/citations/ownership changed: '+alias)
+        require(all(type(row.get(k)) is int and row[k]==0 for k in
+                    ('governing_units_with_zero_anchors','contextual_anchor_coverage_gaps')), 'source coverage is incomplete')
+        require(row['result']['status']=='drafts_admitted' and row['result']['drafts'], 'no admitted drafts')
+        for draft in row['result']['drafts']:
+            require(draft['maximum_unit_characters']==1200 and type(draft.get('maximum_units')) is int and
+                    0<draft['maximum_units']<=64 and type(draft.get('output_allowance_tokens')) is int and
+                    draft['output_allowance_tokens']>0, 'invalid section response allowance')
+    assembly=read(directory/'assembly.json')['assembly']
+    require(canonical_digest({k:assembly[k] for k in ('claims','evidence')})==pins['canonical_assembly_sha256'],
+            'frozen assembly claims or citations changed')
+    require(len(assembly['lineage'])==len(assembly['claims'])==40,'frozen assembly lineage is incomplete')
+    require(sha(directory/'same60.json')==pins['same60_expected_sha256'],'SAME60 complete verdict lists changed')
+
+
+def require_offline_baseline(path):
+    receipt = read(path)
+    require(receipt.get('phase') == 'writer-offline' and receipt.get('passed') is True,
+            'mandatory offline baseline has not passed')
+    require(type(receipt.get('actual_calls')) is int and receipt['actual_calls'] == 0,
+            'offline baseline must have zero model calls')
+    require(receipt.get('source') == offline_source(), 'offline baseline is stale for this source')
+    require(receipt.get('baseline') == offline_manifest(), 'offline baseline inputs changed')
+    verify_frozen_inputs(receipt.get('frozen_inputs'),receipt['baseline'])
+    verify_summary_capture(Path(receipt['summary_packet']))
+    expected = [name for name, _, _ in OFFLINE_TESTS]
+    commands = receipt.get('commands', [])
+    require([row.get('name') for row in commands] == expected, 'incomplete offline baseline commands')
+    require(all(type(row.get('exit')) is int and row['exit'] == 0 for row in commands), 'offline command failed')
+    artifacts = receipt.get('artifacts', {})
+    require(all(name + '.log' in artifacts for name in expected), 'missing offline test artifacts')
+    require({'summary-baseline.json', 'dependencies.json', 'capacity.json', 'assembly.json', 'same60.json'}.issubset(artifacts),
+            'missing baseline result artifacts')
+    verify_artifacts(path, receipt)
+    verify_offline_results(path.parent,receipt['baseline'])
+    for name in expected:
+        require_exact_test_pass((path.parent / (name + '.log')).read_text())
+    return receipt
+
+
+def check_offline_push(updates, pointer):
+    rows = [line.split() for line in updates.decode().splitlines() if line.strip()]
+    require(all(len(row)==4 for row in rows), 'invalid Git push update')
+    live = [row for row in rows if row[1] != '0'*40]
+    if not live: return
+    head = command(['git','rev-parse','HEAD'])
+    require(all(row[1]==head for row in live), 'push must use the tested current checkout')
+    require(pointer.is_file(), 'missing mandatory offline proof; run --phase writer-offline first')
+    pin = read(pointer)
+    path = Path(pin['path'])
+    require(sha(path)==pin['sha256'], 'offline receipt changed')
+    require_offline_baseline(path)
+
+
+def install_offline_gate():
+    common = (REPO / command(['git','rev-parse','--git-common-dir'])).resolve()
+    target=common/'hooks/pre-push'
+    desired=(REPO/'scripts/preproduction-pre-push.py').read_bytes()
+    if target.exists() and target.read_bytes()!=desired and b'baseline policy belongs to c9-preproduction-parity.py' not in target.read_bytes():
+        prior=target.with_name('pre-push.before-docsum-baseline')
+        require(not prior.exists(), 'existing hook backup requires reconciliation')
+        require(os.access(target,os.X_OK), 'existing hook is not executable')
+        target.rename(prior)  # Retain and chain; no existing hook is discarded.
+    target.write_bytes(desired)
+    target.chmod(0o700)
+    print('Installed chained native Git baseline gate: '+str(target),flush=True)
+
+
+def run_offline_baseline(args):
+    baseline_pins = offline_manifest()
+    frozen = read(args.writer_freeze)
+    verify_frozen_inputs(frozen,baseline_pins)
+    require(sha(REPO / SUMMARY_MANIFEST_PATH) == baseline_pins['summary_manifest_sha256'], 'summary baseline manifest changed')
+    summary = verify_summary_capture(args.packet)
+    observed = []
+    for case in summary['cases']:
+        wire = read(args.packet / f"case-{case['case']}-wire-request.json")
+        response = read(args.packet / f"case-{case['case']}-response.raw.json")
+        observed.append({'alias':case['alias'], 'max_tokens':wire['max_tokens'],
+                         'response_format':wire.get('response_format'), 'usage':response['usage']})
+    source = offline_source()
+    out = prepare_evidence_output(args.output)
+    save(out / 'summary-baseline.json', {'baseline':baseline_pins, 'observed':observed})
+    environment = {k:v for k,v in os.environ.items() if not k.startswith(('DOC_SUM_', 'LLAMA_ARG_'))}
+    environment.update(DOC_SUM_OFFLINE_COUNT_INVENTORY=frozen['count_inventory']['path'],
+        DOC_SUM_OFFLINE_COUNT_INVENTORY_SHA256=frozen['count_inventory']['sha256'],
+        DOC_SUM_DEPENDENCIES_INPUT=frozen['source_packet']['path'], DOC_SUM_DEPENDENCIES_OUTPUT=str(out/'dependencies.json'),
+        DOC_SUM_WRITER_CAPACITY_OUTPUT=str(out/'capacity.json'),
+        DOC_SUM_ASSEMBLY_PUBLIC_FREEZE=frozen['assembly_public']['path'], DOC_SUM_ASSEMBLY_PUBLIC_FREEZE_SHA256=frozen['assembly_public']['sha256'],
+        DOC_SUM_ASSEMBLY_REPLAY_OUTPUT=str(out/'assembly.json'),
+        DOC_SUM_FROZEN_CONSOLIDATION_MEASUREMENT=frozen['consolidation']['path'], DOC_SUM_FROZEN_CONSOLIDATION_MEASUREMENT_SHA256=frozen['consolidation']['sha256'],
+        DOC_SUM_GUARD_PRECISION_ROOT=str(Path(frozen['same60_freeze']['path']).parent), DOC_SUM_GUARD_PRECISION_OUTPUT=str(out/'same60.json'))
+    commands = []
+    for name, selector, ignored in OFFLINE_TESTS:
+        cmd = ['cargo', 'test', '--locked', '--all-features', '--lib', selector, '--', '--exact', '--nocapture']
+        if ignored: cmd.append('--ignored')
+        with (out/(name+'.log')).open('x') as log:
+            result = subprocess.run(cmd, cwd=REPO/'src-tauri', env=environment, stdout=log, stderr=subprocess.STDOUT)
+        save(out/(name+'-exit.json'), {'code':result.returncode, 'command':cmd})
+        require(result.returncode == 0, 'offline baseline STOP: ' + name)
+        require_exact_test_pass((out/(name+'.log')).read_text())
+        commands.append({'name':name, 'exit':result.returncode, 'command':cmd})
+        if name == 'dependencies':
+            require(all(row['counts']['unresolved']==0 and row['blocked_units']==0 for row in read(out/'dependencies.json')['inputs']),
+                    'source dependency STOP')
+        if name == 'same60':
+            require(sha(out/'same60.json') == baseline_pins['same60_expected_sha256'], 'SAME60 complete verdict lists changed')
+        print('OFFLINE_BASELINE_PASS ' + name, flush=True)
+    require(source == offline_source(), 'source changed during offline baseline')
+    verify_offline_results(out,baseline_pins)
+    save(out/'receipt.json', {'phase':'writer-offline', 'passed':True, 'actual_calls':0,
+        'source':source, 'baseline':baseline_pins, 'commands':commands,
+        'frozen_inputs':frozen,'summary_packet':str(args.packet.resolve()),
+        'artifacts':{str(p.relative_to(out)):sha(p) for p in out.rglob('*') if p.is_file()}})
+    require_offline_baseline(out/'receipt.json')
+    common=(REPO / command(['git','rev-parse','--git-common-dir'])).resolve()
+    pointer=common/'docsum-offline-baseline.json'
+    pointer.write_text(json.dumps({'path':str(out/'receipt.json'),'sha256':sha(out/'receipt.json')}))
+    pointer.chmod(0o600)
+    print('OFFLINE_BASELINE_RECEIPT ' + str(out/'receipt.json'), flush=True)
+    return 0
 
 
 def http(url, data=None, headers=None, context=None):
@@ -326,15 +517,32 @@ def summary_lane(args, source):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase', choices=['native', 'preflight', 'gateway', 'summary'], required=True)
+    p.add_argument('--phase', choices=['native', 'preflight', 'gateway', 'summary', 'writer-offline', 'check-offline', 'install-offline-gate'], required=True)
     for key in ['packet', 'lock']:
-        p.add_argument('--' + key, type=Path, required=True)
+        p.add_argument('--' + key, type=Path)
     for key in ['deployment', 'model', 'settings']:
         p.add_argument('--' + key, type=Path)
     for key in ['output', 'verify', 'native-receipt', 'gguf', 'server', 'repair-acceptance']:
         p.add_argument('--' + key, type=Path)
+    p.add_argument('--writer-freeze', type=Path)
+    p.add_argument('--offline-baseline-receipt', type=Path)
     args = p.parse_args()
     os.umask(0o077)
+    if args.phase == 'install-offline-gate':
+        install_offline_gate()
+        return 0
+    if args.phase == 'check-offline':
+        require(args.verify is not None, 'offline receipt required')
+        require_offline_baseline(args.verify)
+        print('Offline baseline accepted for current source and frozen inputs')
+        return 0
+    if args.phase == 'writer-offline':
+        require(args.packet is not None and args.writer_freeze is not None and args.output is not None, 'summary packet, writer freeze and durable output required')
+        return run_offline_baseline(args)
+    require(args.packet is not None and args.lock is not None, 'packet and lock required')
+    if args.phase in ('summary','gateway') and args.verify is None:
+        require(args.offline_baseline_receipt is not None, 'mandatory offline baseline receipt required before model launch')
+        require_offline_baseline(args.offline_baseline_receipt)
     source = tree()
     if args.phase == 'summary':
         return summary_lane(args, source)

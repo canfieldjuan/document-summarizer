@@ -88,6 +88,7 @@ mod relation_guard_tests {
                 evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -235,7 +236,7 @@ mod relation_guard_tests {
         ] {
             let source = evidence(source_text);
             let claim = CitedClaim { claim_id: name.into(), text: text.into(), evidence_ids: vec![source.evidence_id.clone()] };
-            let mut verdict = [ClaimVerification { claim_id: claim.claim_id.clone(), evidence_ids: claim.evidence_ids.clone(), verdict: ClaimVerdict::Supported }];
+            let mut verdict = [ClaimVerification { admission_withhold: None, claim_id: claim.claim_id.clone(), evidence_ids: claim.evidence_ids.clone(), verdict: ClaimVerdict::Supported }];
             apply_semantic_fidelity_guards(&[claim], std::slice::from_ref(&source), &mut verdict).unwrap();
             println!("INTENTIONAL_SCOPE_REASONS case={name} {:?}", relation_guard_rejection_reasons(text, &[&source]));
             let supported = verdict[0].verdict == ClaimVerdict::Supported;
@@ -273,6 +274,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verification = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -310,6 +312,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -391,6 +394,7 @@ mod relation_guard_tests {
             evidence_ids: vec![left.evidence_id.clone()],
         };
         let mut verdict = [ClaimVerification {
+            admission_withhold: None,
             claim_id: claim.claim_id.clone(),
             evidence_ids: claim.evidence_ids.clone(),
             verdict: ClaimVerdict::Supported,
@@ -417,6 +421,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verification = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -490,6 +495,7 @@ mod relation_guard_tests {
                 evidence_ids: ids.clone(),
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: ids,
                 verdict: ClaimVerdict::Supported,
@@ -584,6 +590,7 @@ mod relation_guard_tests {
                 evidence_ids: items.iter().map(|item| item.evidence_id.clone()).collect(),
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -613,6 +620,7 @@ mod relation_guard_tests {
             "explicit-grant/source-grant must remain inactive"
         );
         let mut verdict = [ClaimVerification {
+            admission_withhold: None,
             claim_id: "activation-k1".into(),
             evidence_ids: vec![item.evidence_id.clone()],
             verdict: ClaimVerdict::Supported,
@@ -660,6 +668,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -693,6 +702,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verdict = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -723,6 +733,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verification = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -758,6 +769,7 @@ mod relation_guard_tests {
                 evidence_ids: vec![item.evidence_id.clone()],
             };
             let mut verification = [ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -970,6 +982,7 @@ mod relation_guard_tests {
             .summary_claims
             .iter()
             .map(|claim| ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -4851,6 +4864,7 @@ pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
     for (claim, verification) in claims.iter().zip(verifications) {
         if verification.claim_id != claim.claim_id
             || verification.evidence_ids != claim.evidence_ids
+            || !verification.has_valid_admission_carrier()
         {
             return Err(stage_failure(
                 PipelineStage::Verify,

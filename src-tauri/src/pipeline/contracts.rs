@@ -371,7 +371,8 @@ pub struct ChunkedDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRequest {
     pub stage: PipelineStage,
     pub ordinal: u32,
@@ -382,7 +383,14 @@ pub struct ModelRequest {
     pub output_format: ModelOutputFormat,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+impl ModelRequest {
+    pub(crate) fn integrity_sha256(&self) -> Result<String, serde_json::Error> {
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ModelOutputFormat {
     #[default]
     Text,
@@ -509,9 +517,47 @@ pub enum ClaimVerdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimVerification {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_withhold: Option<AdmissionWithhold>,
     pub claim_id: String,
     pub evidence_ids: Vec<String>,
     pub verdict: ClaimVerdict,
+}
+
+impl ClaimVerification {
+    pub(crate) fn has_valid_admission_carrier(&self) -> bool {
+        self.admission_withhold.is_none() || self.verdict == ClaimVerdict::Ambiguous
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionLimits {
+    pub context_tokens: u32,
+    pub schema_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionWithholdReason {
+    GoverningClauseScalars,
+    CombinedScalars,
+    SourceEnumValues,
+    ClaimEnumValues,
+    SchemaBytes,
+    RequestCharacters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionWithhold {
+    pub verification_version: String,
+    pub input_sha256: String,
+    pub limits: AdmissionLimits,
+    pub reason: AdmissionWithholdReason,
+    pub observed: usize,
+    pub minimum: usize,
+    pub maximum: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,8 +691,190 @@ pub struct ExtractedContractClause {
     pub evidence_ids: Vec<String>,
 }
 
+pub(crate) const WHOLE_DOCUMENT_SYNTHESIS_VERSION: &str = "15.0.0";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WholeDocumentProgress {
+    pub document_id: String,
+    pub policy_version: String,
+    pub source_sha256: String,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub context_tokens: u32,
+    pub verification_limits: AdmissionLimits,
+    pub generation_seed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<ModelProfileSnapshot>,
+    pub sections: Vec<WholeDocumentSection>,
+    pub assembly_lineage: Option<Vec<(usize, usize, usize)>>,
+}
+
+impl WholeDocumentProgress {
+    pub(crate) fn has_canonical_status_order(&self) -> bool {
+        let mut open = false;
+        for section in &self.sections {
+            match section.state {
+                WholeDocumentSectionState::Completed { .. }
+                | WholeDocumentSectionState::Split { .. }
+                    if !open => {}
+                WholeDocumentSectionState::Pending => open = true,
+                WholeDocumentSectionState::Dispatched
+                | WholeDocumentSectionState::Failed { .. }
+                | WholeDocumentSectionState::Saturated { .. }
+                    if !open =>
+                {
+                    open = true
+                }
+                _ => return false,
+            }
+        }
+        !self.sections.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WholeDocumentSection {
+    pub primary: Vec<usize>,
+    pub request: ModelRequest,
+    pub request_sha256: String,
+    pub state: WholeDocumentSectionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WholeDocumentSectionState {
+    Pending,
+    Dispatched,
+    Completed {
+        response: WholeDocumentSectionResponse,
+    },
+    Saturated {
+        response: WholeDocumentSectionResponse,
+    },
+    Split {
+        response: WholeDocumentSectionResponse,
+    },
+    Failed {
+        failure: PipelineFailure,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WholeDocumentSectionResponse {
+    pub text: String,
+    pub response_sha256: String,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub request_attempts: Vec<ModelRequestAttemptDiagnostic>,
+}
+
+impl WholeDocumentSection {
+    pub(crate) fn permits_dispatch(&self, next: &Self) -> bool {
+        if self.primary != next.primary
+            || !matches!(self.state, WholeDocumentSectionState::Pending)
+            || !matches!(next.state, WholeDocumentSectionState::Dispatched)
+        {
+            return false;
+        }
+        let mut expected = self.request.clone();
+        let (
+            ModelOutputFormat::JsonSchema { schema: old, .. },
+            ModelOutputFormat::JsonSchema { schema: new, .. },
+        ) = (&mut expected.output_format, &next.request.output_format)
+        else {
+            return false;
+        };
+        let (Some(old_count), Some(new_count)) = (
+            old["properties"]["units"]["maxItems"].as_u64(),
+            new["properties"]["units"]["maxItems"].as_u64(),
+        ) else {
+            return false;
+        };
+        if new_count == 0 || new_count > old_count {
+            return false;
+        }
+        old["properties"]["units"]["maxItems"] = serde_json::json!(new_count);
+        let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&expected.user_prompt)
+        else {
+            return false;
+        };
+        payload["maximum_units"] = serde_json::json!(new_count);
+        expected.user_prompt = payload.to_string();
+        expected.max_output_tokens = next.request.max_output_tokens;
+        expected == next.request
+            && next.request.integrity_sha256().ok().as_ref() == Some(&next.request_sha256)
+    }
+}
+
+impl WholeDocumentProgress {
+    /// A saturated request is immutable history. Only its smaller pending
+    /// children are new work; completed siblings and all header pins are kept.
+    pub(crate) fn permits_split(&self, next: &Self) -> bool {
+        let Some(index) = self
+            .sections
+            .iter()
+            .position(|s| matches!(s.state, WholeDocumentSectionState::Saturated { .. }))
+        else {
+            return false;
+        };
+        let added = next.sections.len().saturating_sub(self.sections.len());
+        if added < 2 || self.sections[..index] != next.sections[..index] {
+            return false;
+        }
+        let parent = &self.sections[index];
+        let mut expected = parent.clone();
+        let WholeDocumentSectionState::Saturated { response } = &parent.state else {
+            return false;
+        };
+        expected.state = WholeDocumentSectionState::Split {
+            response: response.clone(),
+        };
+        if next.sections[index] != expected || parent.primary.len() < 2 {
+            return false;
+        }
+        let children = &next.sections[index + 1..index + 1 + added];
+        if children.iter().any(|s| {
+            s.primary.is_empty()
+                || s.primary.len() >= parent.primary.len()
+                || !matches!(s.state, WholeDocumentSectionState::Pending)
+        }) || children
+            .iter()
+            .flat_map(|s| s.primary.iter())
+            .ne(parent.primary.iter())
+        {
+            return false;
+        }
+        for (old, new) in self.sections[index + 1..]
+            .iter()
+            .zip(&next.sections[index + 1 + added..])
+        {
+            if !matches!(old.state, WholeDocumentSectionState::Pending) {
+                return false;
+            }
+            let mut expected = old.clone();
+            let Some(ordinal) = expected.request.ordinal.checked_add(added as u32) else {
+                return false;
+            };
+            expected.request.ordinal = ordinal;
+            let Ok(hash) = expected.request.integrity_sha256() else {
+                return false;
+            };
+            expected.request_sha256 = hash;
+            if expected != *new {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynthesizedDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole_document_progress: Option<WholeDocumentProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract_extraction: Option<ContractExtraction>,
     pub document_id: String,
@@ -664,6 +892,21 @@ pub struct SynthesizedDocument {
     #[serde(default)]
     pub claims: Vec<CitedClaim>,
     pub warnings: Vec<PipelineWarning>,
+}
+
+impl SynthesizedDocument {
+    pub(crate) fn has_consistent_progress_role(&self) -> bool {
+        match &self.whole_document_progress {
+            Some(progress) => {
+                self.synthesis_version == WHOLE_DOCUMENT_SYNTHESIS_VERSION
+                    && progress.policy_version == self.synthesis_version
+                    && progress.document_id == self.document_id
+                    && progress.runtime_id == self.runtime_id
+                    && progress.model_id == self.model_id
+            }
+            None => self.synthesis_version != WHOLE_DOCUMENT_SYNTHESIS_VERSION,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

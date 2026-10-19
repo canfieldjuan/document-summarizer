@@ -1010,7 +1010,53 @@ pub enum MigrationError {
     Invariant(String),
 }
 
+#[cfg(test)]
+type SetupObservations =
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (usize, usize)>>;
+#[cfg(test)]
+static SETUP_COUNTS: std::sync::OnceLock<SetupObservations> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn setup_key(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+pub(crate) fn setup_counts(path: &std::path::Path) -> (usize, usize) {
+    SETUP_COUNTS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("setup counter poisoned")
+        .get(&setup_key(path))
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn record_setup(conn: &Connection, migration: bool) {
+    let Some(path) = conn.path().filter(|path| !path.is_empty()) else {
+        return;
+    };
+    let mut counts = SETUP_COUNTS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("setup counter poisoned");
+    let count = counts
+        .entry(setup_key(std::path::Path::new(path)))
+        .or_default();
+    if migration {
+        count.0 += 1;
+    } else {
+        count.1 += 1;
+    }
+}
+
 pub fn migrate(conn: &mut Connection) -> Result<(), MigrationError> {
+    #[cfg(test)]
+    record_setup(conn, true);
     let mut current_version = version(conn)?;
     if current_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::UnsupportedVersion {
@@ -1303,6 +1349,8 @@ fn migrate_additive(
 }
 
 fn validate(conn: &Connection) -> Result<(), MigrationError> {
+    #[cfg(test)]
+    record_setup(conn, false);
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
         return Err(MigrationError::Invariant(format!(
@@ -1805,23 +1853,8 @@ mod tests {
     use super::*;
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::fs;
-    use std::path::PathBuf;
-    use uuid::Uuid;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-schema-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     #[test]
     fn schema_v13_backfills_primary_summary_attempts_and_makes_them_immutable() {

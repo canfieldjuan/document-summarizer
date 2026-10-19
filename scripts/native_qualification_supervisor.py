@@ -200,8 +200,12 @@ def systemd_argument(value):
     return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def launch_detached(command, cwd, output, unit, deadline_seconds):
+def launch_detached(command, cwd, output, unit, deadline_seconds, offline_receipt=None):
     deadline_value(deadline_seconds)
+    evidence.require(offline_receipt is not None, 'mandatory offline baseline receipt required before native launch')
+    evidence.require(Path(cwd).resolve() in (evidence.REPO.resolve(), (evidence.REPO/'src-tauri').resolve()),
+                     'native launch must use the tested checkout')
+    evidence.require_offline_baseline(offline_receipt)
     evidence.require(re.fullmatch(r'docsum-qualification-[a-z0-9-]{1,100}', unit) is not None,
                      'qualification unit name required')
     evidence.require(not output.is_symlink(), 'output cannot be a symlink')
@@ -225,6 +229,7 @@ def launch_detached(command, cwd, output, unit, deadline_seconds):
     evidence.save(out / 'detached-launch.json', {
         'unit': unit, 'command': args, 'deadline_seconds': deadline_seconds,
         'owner_sha256': evidence.sha(Path(__file__).resolve()),
+        'offline_baseline_receipt_sha256': evidence.sha(offline_receipt),
     })  # Exclusive create: a failed launch cannot silently become a second attempt.
     result = subprocess.run(args, capture_output=True, text=True)
     evidence.require(result.returncode == 0, 'detached service launch failed: ' + result.stderr)
@@ -242,6 +247,7 @@ def main():
     launch.add_argument('--cwd', type=Path, required=True)
     launch.add_argument('--unit', required=True)
     launch.add_argument('--deadline', type=float, required=True)
+    launch.add_argument('--offline-baseline-receipt', type=Path, required=True)
     launch.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.mode == 'service-stop':
@@ -249,7 +255,8 @@ def main():
     else:
         command = args.command[1:] if args.command[:1] == ['--'] else args.command
         evidence.require(bool(command), 'driver command required')
-        print(launch_detached(command, args.cwd, args.output, args.unit, args.deadline), end='')
+        print(launch_detached(command, args.cwd, args.output, args.unit, args.deadline,
+                              args.offline_baseline_receipt), end='')
 
 
 if __name__ == '__main__':

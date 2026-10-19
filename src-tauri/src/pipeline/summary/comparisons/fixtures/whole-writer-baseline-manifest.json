@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "inputs": {
+    "count_inventory": "4acafb6e49cc954d9f586f1020e44f7c4b35210ff69f29e780d8a6a6b8c9b9d2",
+    "source_packet": "d749233fc56720f675af9248e80db2d122b48bc17c73948a44b07d37712143e7",
+    "assembly_public": "71e6cdc9ea6c8284e4ca2f422db9df930eac25695f6958ccc8ce1db7a81c6c1a",
+    "consolidation": "f196a2e4081f278781b9d50a395dc62aa917c4d82c2b0722f1515819411c9f6c",
+    "same60_freeze": "edafc01a578e0cfae3e8a99c699ac608c8fb65fceaca226a07170ab5bdb5f728"
+  },
+  "summary_manifest_sha256": "5ed3e4c777eb6dd6da0f2c8cf03d3b084f11969f04e7f65ae99af11ebe8fd4cc",
+  "same60_expected_sha256": "ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53",
+  "approved_departures": [
+    "atomic claim JSON with owned citations",
+    "complete governing dependency context",
+    "deterministic assembly",
+    "unchanged C9 fidelity verification"
+  ],
+  "baseline_kind": "whole-document capacity and reproducibility; not complete-fidelity gold",
+  "summary_capture_sources": {
+    "summary_run.py": "fb2fff0b00079aa359eda1d634ec9c0ce552c53d912527e29ce4b297de284015",
+    "summary_models.json": "e2f78fcf5d42b0153f1cfb534e424ec428e9a661fcfd822251b82ad99a60593b",
+    "summary_facts.py": "81348c4600e62d93a7015f67e9421dbf1c7a489e11a352466828f29b9cc90c17"
+  },
+  "writer_source_ownership": {
+    "preproduction-1": "0183ba99ace3eaeb886f8243ab1a6cb585cabe189a00ec168dfa2a4bda4bd1a2",
+    "preproduction-2": "c7a0e628c6e154d186415eda16ea4277755800b4c46d44212400945e07d4b801",
+    "public-over-context-control": "3d89719c3bdcf591a39e3394c4bb5303dbe919cd5cc104c4b5f12ca9450fb7a1"
+  },
+  "canonical_assembly_sha256": "db641156969e3a7971c93ed3bf55addfc88b2ce43c83b5d2c4647fb138964873",
+  "dependency_report_sha256": "a2b0d5c6a023f27e967f91dc52eb1cacbdcf95d32b358daba8bd14801d09e1bc"
+}

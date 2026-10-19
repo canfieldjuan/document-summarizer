@@ -43,14 +43,16 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+      - name: Frontend storage recovery regressions
+        run: npm run test:frontend
       - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
       - name: Test all targets and features
         working-directory: src-tauri
         run: cargo test --locked --all-targets --all-features
-      - name: Test C9 qualification receipt boundaries
-        run: python3 -m unittest discover -s scripts -p 'test_c9_preproduction_parity.py'
+      - name: Test mandatory baseline and qualification boundaries
+        run: python3 -m unittest discover -s scripts
       - name: Deny clippy warnings
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -133,6 +135,20 @@ jobs:
       - name: Run native Windows Connect tests
         working-directory: src-tauri
         run: 'cargo test --locked --lib connect::'
+      - name: Frontend storage recovery regressions
+        run: npm run test:frontend
+      - name: Run native Windows storage error projection tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib storage_error_tests::'
+      - name: Run native Windows store lifecycle tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib pipeline::db::lifecycle::tests:: -- --nocapture'
+      - name: Run native Windows desktop storage startup tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib desktop_startup::tests:: -- --nocapture'
+      - name: Run native Windows explicit storage retry tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib pipeline::db::access::tests:: -- --nocapture'
       - name: Deny native Windows warnings
         working-directory: src-tauri
         run: 'cargo clippy --locked --lib --tests -- -D warnings'

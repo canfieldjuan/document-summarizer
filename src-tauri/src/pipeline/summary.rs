@@ -54,6 +54,7 @@ const PRE_CLAUSE_SYNTHESIS_VERSION: &str = "11.0.0";
 const PRE_FURNITURE_SYNTHESIS_VERSION: &str = "10.0.0";
 const PRE_BALANCED_SYNTHESIS_VERSION: &str = "9.0.0";
 pub const VERIFICATION_VERSION: &str = "15.0.0";
+const WHOLE_DOCUMENT_VERIFICATION_VERSION: &str = "16.0.0";
 const PRE_SEGMENT_ENUM_VERIFICATION_VERSION: &str = "12.0.0";
 const PRE_COMPARISON_VERIFICATION_VERSION: &str = "11.0.0";
 const PRE_CLAUSE_VERIFICATION_VERSION: &str = "10.0.0";
@@ -158,7 +159,8 @@ impl SummaryDeliveryPolicy {
 fn coherent_synthesis_version_supported(version: &str) -> bool {
     matches!(
         version,
-        SYNTHESIS_VERSION
+        coherent::WHOLE_DOCUMENT_VERSION
+            | SYNTHESIS_VERSION
             | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
             | PRE_CLAUSE_SYNTHESIS_VERSION
@@ -173,7 +175,8 @@ fn coherent_synthesis_version_supported(version: &str) -> bool {
 fn coherent_synthesis_uses_clause_verification(version: &str) -> bool {
     matches!(
         version,
-        SYNTHESIS_VERSION
+        coherent::WHOLE_DOCUMENT_VERSION
+            | SYNTHESIS_VERSION
             | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
             | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
     )
@@ -183,6 +186,9 @@ fn coherent_verification_versions_match(
     synthesis_version: &str,
     verification_version: &str,
 ) -> bool {
+    if synthesis_version == coherent::WHOLE_DOCUMENT_VERSION {
+        return verification_version == WHOLE_DOCUMENT_VERIFICATION_VERSION;
+    }
     (coherent_synthesis_uses_clause_verification(synthesis_version)
         && matches!(
             verification_version,
@@ -653,6 +659,39 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
     control: &dyn ExecutionControl,
     delivery_policy: Option<SummaryDeliveryPolicy>,
 ) -> Result<SynthesizedDocument, SummaryPipelineError> {
+    synthesize_analyzed_document_for_policy(
+        conn,
+        runtime,
+        run_id,
+        control,
+        delivery_policy,
+        SYNTHESIS_VERSION,
+    )
+}
+
+// Explicit internal qualification seam. Ordinary callers remain on the current
+// policy; the candidate gate still rejects this version in application builds.
+pub(crate) fn synthesize_analyzed_document_for_policy(
+    conn: &mut Connection,
+    runtime: &dyn ModelRuntime,
+    run_id: &str,
+    control: &dyn ExecutionControl,
+    delivery_policy: Option<SummaryDeliveryPolicy>,
+    synthesis_version: &str,
+) -> Result<SynthesizedDocument, SummaryPipelineError> {
+    let whole_document = synthesis_version == coherent::WHOLE_DOCUMENT_VERSION;
+    if whole_document {
+        comparisons::require_candidate_enabled().map_err(SummaryPipelineError::StageFailed)?;
+        cancellation_checkpoint(control, PipelineStage::Synthesize)
+            .map_err(SummaryPipelineError::StageFailed)?;
+    } else if synthesis_version != SYNTHESIS_VERSION {
+        return Err(SummaryPipelineError::StageFailed(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIS_POLICY",
+            "The selected synthesis policy is unsupported",
+            false,
+        )));
+    }
     let run = db::get_pipeline_run(conn, run_id)?
         .ok_or_else(|| StoreError::RunNotFound(run_id.to_string()))?;
     let normalized = db::get_normalized_document(conn, run_id)?
@@ -661,10 +700,45 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
         .ok_or_else(|| StoreError::ChunkedArtifactNotFound(run_id.to_string()))?;
     let summary_profile = db::get_run_summary_profile(conn, run_id)?
         .ok_or_else(|| StoreError::SummaryProfileUnavailable(run_id.to_string()))?;
+    if whole_document && summary_profile != SummaryProfile::General {
+        return Err(SummaryPipelineError::StageFailed(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIS_POLICY",
+            "Whole-document synthesis is a General-only candidate",
+            false,
+        )));
+    }
 
     let (synthesizing_run, persisted_analysis) =
-        db::start_synthesis(conn, run_id, run.state_version)?;
-    let synthesis = match (delivery_policy, summary_profile) {
+        if whole_document && run.state == crate::pipeline::contracts::PipelineState::Synthesizing {
+            if db::get_whole_synthesis_progress(conn, run_id)?.is_none() {
+                return Err(StoreError::WholeDocumentProgressConflict {
+                    run_id: run_id.into(),
+                }
+                .into());
+            }
+            let analyzed = db::get_analyzed_document(conn, run_id)?.ok_or_else(|| {
+                StoreError::DownstreamArtifactNotFound {
+                    artifact_kind: "analyzed".into(),
+                    run_id: run_id.into(),
+                }
+            })?;
+            (run.clone(), analyzed)
+        } else {
+            db::start_synthesis(conn, run_id, run.state_version)?
+        };
+    let synthesis = if whole_document {
+        coherent::whole_document::run_sections(
+            conn,
+            &synthesizing_run,
+            runtime,
+            &persisted_analysis,
+            &chunked,
+            &normalized,
+            control,
+        )
+    } else {
+        match (delivery_policy, summary_profile) {
         (_, SummaryProfile::Contract) => {
             if contract_extraction::version_supported(&persisted_analysis.analysis_version) {
                 contract_extraction::synthesize(&persisted_analysis, &chunked, &normalized, control)
@@ -694,13 +768,14 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
             generation_seed_for_run(run_id),
             control,
         ),
+    }.map_err(SummaryPipelineError::StageFailed)
     };
     let synthesized = match synthesis {
         Ok(synthesized) => synthesized,
-        Err(failure) if cancellation_observed(&failure) => {
+        Err(SummaryPipelineError::StageFailed(failure)) if cancellation_observed(&failure) => {
             return Err(SummaryPipelineError::CancellationObserved);
         }
-        Err(failure) => {
+        Err(SummaryPipelineError::StageFailed(failure)) => {
             return Err(persist_failure(
                 conn,
                 run_id,
@@ -709,6 +784,7 @@ pub(crate) fn synthesize_analyzed_document_controlled_with_delivery(
                 failure,
             ));
         }
+        Err(error) => return Err(error),
     };
     complete_synthesis(conn, run_id, synthesizing_run.state_version, &synthesized)?;
     Ok(synthesized)
@@ -969,7 +1045,8 @@ pub(crate) fn complete_verified_document_with_delivery(
             PRE_DISCLOSURE_SUMMARY_VERSION
         }
         PRE_CONTEXT_VERIFICATION_VERSION => PRE_CONTEXT_SUMMARY_VERSION,
-        VERIFICATION_VERSION
+        WHOLE_DOCUMENT_VERIFICATION_VERSION
+        | VERIFICATION_VERSION
         | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
         | PRE_COMPARISON_VERIFICATION_VERSION
         | PRE_CLAUSE_VERIFICATION_VERSION => SUMMARY_VERSION,
@@ -1036,12 +1113,15 @@ pub(crate) fn complete_verified_document_with_delivery(
             ));
         }
     };
+    let admission_coverage = whole_document_delivery_coverage(&verified, &persisted_synthesis)
+        .map_err(SummaryPipelineError::StageFailed)?;
     if page_coverage_required(summary_profile, delivery_policy)
-        && !delivery_page_coverage_with_warnings(
+        && !delivery_coverage_with_admission(
             &cited_pages,
             &persisted_analysis.omissions,
             &normalized,
             &persisted_synthesis.warnings,
+            admission_coverage.as_ref(),
         )
     {
         return Err(persist_final_failure(
@@ -1306,16 +1386,57 @@ fn verify(
         .collect::<Vec<_>>();
     let ledger_prompt = verification_prompt(&synthesized.claims, &ledger_evidence)?;
     let verification_claim_budget = verification_claim_budget(synthesized, normalized)?;
+    let whole_plan = (synthesized.synthesis_version == coherent::WHOLE_DOCUMENT_VERSION)
+        .then(|| {
+            coherent::whole_document_verification_plan(runtime, synthesized, normalized, chunked)
+        })
+        .transpose()?;
+    let whole_ledger_batches = if let Some(plan) = &whole_plan {
+        let batches = verification_batches_for_runtime(
+            runtime,
+            &ledger_prompt,
+            &synthesized.claims,
+            verification_claim_budget,
+        )?;
+        let mut ordinal = 0;
+        for batch in &batches {
+            cancellation_checkpoint(control, PipelineStage::Verify)?;
+            let next = reserve_model_request_ordinal(&mut ordinal, PipelineStage::Verify)?;
+            runtime
+                .preflight_request(&verification_request(batch, next, generation_seed))
+                .map_err(|failure| {
+                    runtime_pipeline_failure(
+                        PipelineStage::Verify,
+                        "MODEL_VERIFICATION_ADMISSION",
+                        failure,
+                    )
+                })?;
+        }
+        plan.preflight(runtime, generation_seed, ordinal, control)?;
+        Some(batches)
+    } else {
+        None
+    };
     let mut next_request_ordinal = 0;
-    let mut claim_verifications = classify_claim_support(
-        runtime,
-        &ledger_prompt,
-        &synthesized.claims,
-        verification_claim_budget,
-        generation_seed,
-        &mut next_request_ordinal,
-        control,
-    )?;
+    let mut claim_verifications = if let Some(batches) = whole_ledger_batches {
+        classify_verification_batches(
+            runtime,
+            batches,
+            generation_seed,
+            &mut next_request_ordinal,
+            control,
+        )?
+    } else {
+        classify_claim_support(
+            runtime,
+            &ledger_prompt,
+            &synthesized.claims,
+            verification_claim_budget,
+            generation_seed,
+            &mut next_request_ordinal,
+            control,
+        )?
+    };
     if synthesized.presentation_mode == SummaryPresentationMode::ClaimLedgerFallback {
         coherent::apply_semantic_fidelity_guards(
             &synthesized.claims,
@@ -1334,12 +1455,15 @@ fn verify(
 
     let mut summary_claim_verifications = if synthesized.summary_claims.is_empty() {
         Vec::new()
+    } else if let Some(plan) = whole_plan {
+        plan.classify(runtime, generation_seed, &mut next_request_ordinal, control)?
     } else {
         let batches = coherent::summary_verification_batches(
             summary_profile,
             runtime,
             synthesized,
             normalized,
+            Some(chunked),
         )?;
         classify_verification_batches(
             runtime,
@@ -1429,6 +1553,7 @@ fn verify(
             Vec::new()
         };
     let verification_version = match synthesized.synthesis_version.as_str() {
+        coherent::WHOLE_DOCUMENT_VERSION => WHOLE_DOCUMENT_VERIFICATION_VERSION,
         _ if comparisons::applies(summary_profile, synthesized) => VERIFICATION_VERSION,
         version if coherent_synthesis_uses_clause_verification(version) => {
             PRE_COMPARISON_VERIFICATION_VERSION
@@ -1928,19 +2053,9 @@ fn verification_claim_budget(
     synthesized: &SynthesizedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<usize, PipelineFailure> {
-    if matches!(
-        synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION
-            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
-            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
-            | PRE_CLAUSE_SYNTHESIS_VERSION
-            | PRE_FURNITURE_SYNTHESIS_VERSION
-            | PRE_BALANCED_SYNTHESIS_VERSION
-            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
-            | PRE_CONTEXT_SYNTHESIS_VERSION
-            | PRE_DISCLOSURE_SYNTHESIS_VERSION
-            | DIRECT_SYNTHESIS_VERSION
-    ) {
+    if coherent_synthesis_version_supported(&synthesized.synthesis_version)
+        || synthesized.synthesis_version == DIRECT_SYNTHESIS_VERSION
+    {
         Ok(direct::MAX_CLAIMS)
     } else if synthesized.synthesis_version == HIERARCHICAL_SYNTHESIS_VERSION {
         document_claim_budget(normalized)
@@ -2013,6 +2128,7 @@ fn coherent_verification_exceeds_runtime_context(
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
     generation_seed: u64,
+    chunked: Option<&ChunkedDocument>,
 ) -> Result<bool, PipelineFailure> {
     if synthesized.presentation_mode != SummaryPresentationMode::Coherent {
         return Ok(false);
@@ -2032,11 +2148,35 @@ fn coherent_verification_exceeds_runtime_context(
         verification_claim_budget(synthesized, normalized)?,
     )?;
 
+    if synthesized.synthesis_version == coherent::WHOLE_DOCUMENT_VERSION {
+        let chunked = chunked.ok_or_else(|| {
+            stage_failure(
+                PipelineStage::Verify,
+                "INVALID_SYNTHESIZED_DOCUMENT",
+                "Whole-document admission requires its original chunk bindings",
+                false,
+            )
+        })?;
+        let plan =
+            coherent::whole_document_verification_plan(runtime, synthesized, normalized, chunked)?;
+        let first = u32::try_from(ledger_batches.len()).map_err(|_| {
+            stage_failure(
+                PipelineStage::Verify,
+                "VERIFICATION_PLAN_TOO_LARGE",
+                "Verification request ordinal exceeds its bound",
+                false,
+            )
+        })?;
+        plan.preflight(runtime, generation_seed, first, &UNCONTROLLED_EXECUTION)?;
+        return Ok(false);
+    }
+
     let summary_batches = match coherent::summary_verification_batches(
         summary_profile,
         runtime,
         synthesized,
         normalized,
+        chunked,
     ) {
         Ok(batches) => batches,
         Err(failure) if failure.code == "VERIFICATION_INPUT_TOO_LARGE" => return Ok(true),
@@ -2909,6 +3049,150 @@ pub(crate) fn delivery_claim_prefix_coverage_satisfied(
     delivery_page_coverage_with_warnings(&cited_pages, omissions, normalized, warnings)
 }
 
+#[derive(Debug)]
+pub(crate) struct WholeDocumentDeliveryCoverage {
+    document_id: String,
+    supported_claims: Vec<CitedClaim>,
+    held_pages: HashSet<u32>,
+}
+
+fn whole_document_delivery_coverage(
+    verified: &VerifiedDocument,
+    synthesized: &SynthesizedDocument,
+) -> Result<Option<WholeDocumentDeliveryCoverage>, PipelineFailure> {
+    if synthesized.synthesis_version != coherent::WHOLE_DOCUMENT_VERSION {
+        return Ok(None);
+    }
+    if verified.verification_version != WHOLE_DOCUMENT_VERIFICATION_VERSION
+        || verified.presentation_mode != SummaryPresentationMode::Coherent
+        || verified.summary_claim_verifications.len() != synthesized.summary_claims.len()
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Delivery admission must match the whole-document verification policy",
+            false,
+        ));
+    }
+    let mut held = Vec::new();
+    for (claim, verdict) in synthesized
+        .summary_claims
+        .iter()
+        .zip(&verified.summary_claim_verifications)
+    {
+        if claim.claim_id != verdict.claim_id
+            || claim.evidence_ids != verdict.evidence_ids
+            || !verdict.has_valid_admission_carrier()
+        {
+            return Err(stage_failure(
+                PipelineStage::Verify,
+                "INVALID_VERIFIED_DOCUMENT",
+                "Delivery admission identities must match their original claims",
+                false,
+            ));
+        }
+        if verdict.admission_withhold.is_some() {
+            held.push(claim.clone());
+        }
+    }
+    let held_pages = claim_pages(&held, &synthesized.synthesis_evidence).ok_or_else(|| {
+        stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Admission-held claims require owned evidence",
+            false,
+        )
+    })?;
+    Ok(Some(WholeDocumentDeliveryCoverage {
+        document_id: synthesized.document_id.clone(),
+        supported_claims: verified.summary_claims.clone(),
+        held_pages,
+    }))
+}
+
+fn delivery_coverage_with_admission(
+    cited_pages: &HashSet<u32>,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+    admission: Option<&WholeDocumentDeliveryCoverage>,
+) -> bool {
+    if delivery_page_coverage_with_warnings(cited_pages, omissions, normalized, warnings) {
+        return true;
+    }
+    let Some(admission) = admission else {
+        return false;
+    };
+    if admission.document_id != normalized.document_id {
+        return false;
+    }
+    // These are accounted-for omissions, not verified citations. Keep the
+    // native-page denominator and all unrelated coverage requirements intact.
+    let accounted = cited_pages.union(&admission.held_pages).copied().collect();
+    delivery_page_coverage_with_warnings(&accounted, omissions, normalized, warnings)
+}
+
+pub(crate) fn validated_delivery_admission(
+    conn: &Connection,
+    run_id: &str,
+    summary: &SummaryArtifacts,
+) -> Result<Option<WholeDocumentDeliveryCoverage>, SummaryPipelineError> {
+    let missing = |kind: &str| StoreError::DownstreamArtifactNotFound {
+        artifact_kind: kind.into(),
+        run_id: run_id.into(),
+    };
+    let verified = db::get_verified_document(conn, run_id)?.ok_or_else(|| missing("verified"))?;
+    let synthesized = db::get_synthesis_attempt(conn, run_id, verified.synthesis_attempt_ordinal)?
+        .ok_or_else(|| missing("synthesis attempt"))?;
+    let analyzed = db::get_analyzed_document(conn, run_id)?.ok_or_else(|| missing("analyzed"))?;
+    let chunked = db::get_chunked_document(conn, run_id)?.ok_or_else(|| missing("chunked"))?;
+    let normalized =
+        db::get_normalized_document(conn, run_id)?.ok_or_else(|| missing("normalized"))?;
+    validate_citation_artifact(
+        &summary.citations,
+        &summary.summary,
+        &verified,
+        &synthesized,
+        &analyzed,
+        &chunked,
+        &normalized,
+    )
+    .map_err(SummaryPipelineError::StageFailed)?;
+    whole_document_delivery_coverage(&verified, &synthesized)
+        .map_err(SummaryPipelineError::StageFailed)
+}
+
+pub(crate) fn delivery_claim_prefix_with_admission(
+    citations: &CitationArtifact,
+    delivered_claim_count: usize,
+    omissions: &[AnalysisPageOmission],
+    normalized: &NormalizedDocument,
+    warnings: &[PipelineWarning],
+    admission: Option<&WholeDocumentDeliveryCoverage>,
+) -> bool {
+    let Some(admission) = admission else {
+        return delivery_claim_prefix_coverage_satisfied(
+            citations,
+            delivered_claim_count,
+            omissions,
+            normalized,
+            warnings,
+        );
+    };
+    if citations.document_id != admission.document_id
+        || citations.presentation_mode != SummaryPresentationMode::Coherent
+        || citations.summary_claims != admission.supported_claims
+        || delivered_claim_count == 0
+        || delivered_claim_count != admission.supported_claims.len()
+    {
+        return false;
+    }
+    let Some(pages) = claim_pages(&citations.summary_claims, &citations.evidence) else {
+        return false;
+    };
+    delivery_coverage_with_admission(&pages, omissions, normalized, warnings, Some(admission))
+}
+
 #[cfg(test)]
 fn build_analysis_scopes(
     chunk: &crate::pipeline::contracts::DocumentChunk,
@@ -3161,44 +3445,10 @@ fn analysis_quote_segmentation_for_version(
 }
 
 fn analysis_quote_segments_v12(source: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let trimmed = source.trim();
-    if trimmed.is_empty() {
-        return segments;
-    }
-    let mut cursor = source.len() - source.trim_start().len();
-    let source_end = cursor + trimmed.len();
-    while cursor < source_end {
-        while cursor < source_end {
-            let character = source[cursor..]
-                .chars()
-                .next()
-                .expect("cursor must remain on a character boundary");
-            if !character.is_whitespace() {
-                break;
-            }
-            cursor += character.len_utf8();
-        }
-        if cursor >= source_end {
-            break;
-        }
-        let remaining = &source[cursor..source_end];
-        let hard_end = remaining
-            .char_indices()
-            .nth(MAX_ANALYSIS_QUOTE_CHARACTERS)
-            .map_or(source_end, |(offset, _)| cursor + offset);
-        let split_end = if hard_end == source_end {
-            source_end
-        } else {
-            preferred_analysis_quote_boundary_v12(source, cursor, hard_end).unwrap_or(hard_end)
-        };
-        let exact_quote = source[cursor..split_end].trim();
-        if !exact_quote.is_empty() {
-            segments.push(exact_quote.to_string());
-        }
-        cursor = split_end;
-    }
-    segments
+    quote_segments::bounded_spans(source)
+        .into_iter()
+        .map(|(start, end)| source[start..end].to_string())
+        .collect()
 }
 
 fn preferred_analysis_quote_boundary_v12(
@@ -3278,6 +3528,13 @@ fn analysis_quote_segments_v13(source: &str) -> AnalysisQuoteSegmentation {
 }
 
 fn analysis_sentence_units_v13(source: &str) -> (Vec<(usize, usize)>, usize) {
+    analysis_sentence_ranges(source, true)
+}
+
+fn analysis_sentence_ranges(
+    source: &str,
+    legacy_short_abbreviations: bool,
+) -> (Vec<(usize, usize)>, usize) {
     let source_start = source.len() - source.trim_start().len();
     let source_end = source.trim_end().len();
     if source_start >= source_end {
@@ -3289,7 +3546,12 @@ fn analysis_sentence_units_v13(source: &str) -> (Vec<(usize, usize)>, usize) {
         source[source_start..source_end].split_sentence_bound_indices()
     {
         let proposed_end = source_start + relative_start + proposed.len();
-        if safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end) {
+        let accepted = if legacy_short_abbreviations {
+            safe_analysis_sentence_boundary(source, unit_start, proposed_end, source_end)
+        } else {
+            analysis_sentence_boundary(source, unit_start, proposed_end, source_end, false)
+        };
+        if accepted {
             let start = unit_start + source[unit_start..proposed_end].len()
                 - source[unit_start..proposed_end].trim_start().len();
             let end = unit_start + source[unit_start..proposed_end].trim_end().len();
@@ -3733,6 +3995,7 @@ fn parse_verification_response(
                 )
             })?;
             Ok(ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict,
@@ -3751,6 +4014,9 @@ fn verification_warnings(
         .iter()
         .filter(|warning| match warning.code.as_str() {
             "SEMANTIC_VERIFICATION_DEFERRED" | "SEMANTIC_CLAIMS_WITHHELD" => false,
+            "SEMANTIC_VERIFICATION_CAPACITY_WITHHELD" => {
+                synthesized.synthesis_version != coherent::WHOLE_DOCUMENT_VERSION
+            }
             COVERAGE_SHORTFALL_WARNING_CODE => warning.stage == Some(PipelineStage::Analyze),
             _ => true,
         })
@@ -3762,8 +4028,26 @@ fn verification_warnings(
         .count();
     let ambiguous = verifications
         .iter()
-        .filter(|verification| verification.verdict == ClaimVerdict::Ambiguous)
+        .filter(|verification| {
+            verification.verdict == ClaimVerdict::Ambiguous
+                && verification.admission_withhold.is_none()
+        })
         .count();
+    for (index, claim) in synthesized.summary_claims.iter().enumerate() {
+        if verifications
+            .iter()
+            .any(|v| v.claim_id == claim.claim_id && v.admission_withhold.is_some())
+        {
+            warnings.push(PipelineWarning {
+                code: "SEMANTIC_VERIFICATION_CAPACITY_WITHHELD".into(),
+                message: format!(
+                    "Claim {}: too long to verify; omitted from this summary.",
+                    index + 1
+                ),
+                stage: Some(PipelineStage::Verify),
+            });
+        }
+    }
     if unsupported + ambiguous > 0 {
         warnings.push(PipelineWarning {
             code: "SEMANTIC_CLAIMS_WITHHELD".to_string(),
@@ -3875,6 +4159,33 @@ fn apply_verified_delivery_coverage_fallback(
         )
     {
         return Ok(verified);
+    }
+    if synthesized.synthesis_version == coherent::WHOLE_DOCUMENT_VERSION {
+        let admission = whole_document_delivery_coverage(&verified, synthesized)?;
+        let pages = claim_pages(&verified.summary_claims, &verified.synthesis_evidence)
+            .ok_or_else(|| {
+                stage_failure(
+                    PipelineStage::Verify,
+                    "INVALID_VERIFIED_DOCUMENT",
+                    "Supported claims require owned evidence",
+                    false,
+                )
+            })?;
+        if delivery_coverage_with_admission(
+            &pages,
+            &analyzed.omissions,
+            normalized,
+            &synthesized.warnings,
+            admission.as_ref(),
+        ) {
+            return Ok(verified);
+        }
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "SUMMARY_DELIVERY_COVERAGE_UNSATISFIED",
+            "Missing verified coverage is not explained by admission-held claims",
+            false,
+        ));
     }
     let ledger_evidence = analyzed
         .chunks
@@ -4249,6 +4560,14 @@ fn validate_synthesized_document(
     normalized: &NormalizedDocument,
     runtime: &dyn ModelRuntime,
 ) -> Result<(), PipelineFailure> {
+    if !synthesized.has_consistent_progress_role() {
+        return Err(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIZED_DOCUMENT",
+            "Section progress must belong to the matching writer policy and source identity",
+            false,
+        ));
+    }
     if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
     }
@@ -4297,6 +4616,14 @@ fn validate_synthesized_document_without_runtime(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    if !synthesized.has_consistent_progress_role() {
+        return Err(stage_failure(
+            PipelineStage::Synthesize,
+            "INVALID_SYNTHESIZED_DOCUMENT",
+            "Section progress must belong to the matching writer policy and source identity",
+            false,
+        ));
+    }
     if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_synthesis(synthesized, analyzed, chunked, normalized);
     }
@@ -4310,39 +4637,22 @@ fn validate_synthesized_document_without_runtime(
     }
 
     validate_analyzed_content(analyzed, chunked, normalized)?;
-    let synthesis_version_supported = matches!(
-        synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION
-            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
-            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
-            | PRE_CLAUSE_SYNTHESIS_VERSION
-            | PRE_FURNITURE_SYNTHESIS_VERSION
-            | PRE_BALANCED_SYNTHESIS_VERSION
-            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
-            | PRE_CONTEXT_SYNTHESIS_VERSION
-            | PRE_DISCLOSURE_SYNTHESIS_VERSION
-            | DIRECT_SYNTHESIS_VERSION
-            | HIERARCHICAL_SYNTHESIS_VERSION
-            | PREVIOUS_SYNTHESIS_VERSION
-            | LEGACY_SYNTHESIS_VERSION
-    );
+    let synthesis_version_supported =
+        coherent_synthesis_version_supported(&synthesized.synthesis_version)
+            || matches!(
+                synthesized.synthesis_version.as_str(),
+                DIRECT_SYNTHESIS_VERSION
+                    | HIERARCHICAL_SYNTHESIS_VERSION
+                    | PREVIOUS_SYNTHESIS_VERSION
+                    | LEGACY_SYNTHESIS_VERSION
+            );
     let historical_metadata_valid =
         coherent_synthesis_version_supported(&synthesized.synthesis_version)
             || (synthesized.runtime_id == analyzed.runtime_id
                 && synthesized.model_id == analyzed.model_id);
-    let claim_limit = if matches!(
-        synthesized.synthesis_version.as_str(),
-        SYNTHESIS_VERSION
-            | PRE_DRAFT_GUIDANCE_SYNTHESIS_VERSION
-            | PRE_RUNNING_FURNITURE_SYNTHESIS_VERSION
-            | PRE_CLAUSE_SYNTHESIS_VERSION
-            | PRE_FURNITURE_SYNTHESIS_VERSION
-            | PRE_BALANCED_SYNTHESIS_VERSION
-            | PRE_CONTRACT_SOURCE_SYNTHESIS_VERSION
-            | PRE_CONTEXT_SYNTHESIS_VERSION
-            | PRE_DISCLOSURE_SYNTHESIS_VERSION
-            | DIRECT_SYNTHESIS_VERSION
-    ) {
+    let claim_limit = if coherent_synthesis_version_supported(&synthesized.synthesis_version)
+        || synthesized.synthesis_version == DIRECT_SYNTHESIS_VERSION
+    {
         direct::MAX_CLAIMS
     } else {
         LEGACY_MAX_SUMMARY_CLAIMS
@@ -4601,6 +4911,23 @@ fn validate_verified_document(
     chunked: &ChunkedDocument,
     normalized: &NormalizedDocument,
 ) -> Result<(), PipelineFailure> {
+    if verified
+        .claim_verifications
+        .iter()
+        .any(|v| v.admission_withhold.is_some())
+        || verified.summary_claim_verifications.iter().any(|v| {
+            !v.has_valid_admission_carrier()
+                || (v.admission_withhold.is_some()
+                    && verified.verification_version != WHOLE_DOCUMENT_VERIFICATION_VERSION)
+        })
+    {
+        return Err(stage_failure(
+            PipelineStage::Verify,
+            "INVALID_VERIFIED_DOCUMENT",
+            "Admission holds must belong to the whole-document policy and cannot be model verdicts",
+            false,
+        ));
+    }
     if contract_extraction::version_supported(&synthesized.synthesis_version) {
         return contract_extraction::validate_verified(
             verified,
@@ -4642,8 +4969,15 @@ fn validate_verified_document(
             | PRE_SEGMENT_ENUM_VERIFICATION_VERSION
             | PRE_COMPARISON_VERIFICATION_VERSION
             | VERIFICATION_VERSION
+            | WHOLE_DOCUMENT_VERIFICATION_VERSION
     ) {
-        return validate_coherent_verified_document(verified, synthesized, analyzed, normalized);
+        return validate_coherent_verified_document(
+            verified,
+            synthesized,
+            analyzed,
+            normalized,
+            chunked,
+        );
     }
 
     let expected_version = if synthesized.synthesis_version == DIRECT_SYNTHESIS_VERSION {
@@ -4721,7 +5055,14 @@ fn validate_coherent_verified_document(
     synthesized: &SynthesizedDocument,
     analyzed: &AnalyzedDocument,
     normalized: &NormalizedDocument,
+    chunked: &ChunkedDocument,
 ) -> Result<(), PipelineFailure> {
+    coherent::validate_admission_records(
+        synthesized,
+        normalized,
+        chunked,
+        &verified.summary_claim_verifications,
+    )?;
     let delivery_coverage_fallback = matches!(
         synthesized.synthesis_version.as_str(),
         SYNTHESIS_VERSION
@@ -5327,6 +5668,14 @@ fn build_citation_artifact(
     Ok(artifact)
 }
 
+pub(crate) fn partial_excerpt_evidence_ids(
+    synthesized: &SynthesizedDocument,
+    chunked: &ChunkedDocument,
+    normalized: &NormalizedDocument,
+) -> Result<HashSet<String>, PipelineFailure> {
+    coherent::partial_excerpt_evidence_ids(synthesized, chunked, normalized)
+}
+
 pub(crate) fn expected_citation_version(summary_version: &str) -> Option<&'static str> {
     match summary_version {
         "9.0.0" => Some("5.0.0"),
@@ -5876,28 +6225,14 @@ mod tests {
     use crate::pipeline::structure::{structure_document, DeterministicStructureInterpreter};
     use rusqlite::params;
     use sha2::{Digest, Sha256};
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use uuid::Uuid;
 
     const TEST_GENERATION_SEED: u64 = 9_876_543;
     const OVERSIZED_SYNTHESIS_EVIDENCE_COUNT: usize = 48;
 
-    struct TestDatabase(PathBuf);
-
-    impl TestDatabase {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("doc-sum-summary-{}.db", Uuid::new_v4())))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
+    use crate::test_store::DatabaseFixture as TestDatabase;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailurePoint {
@@ -8581,6 +8916,7 @@ mod tests {
             .claims
             .iter()
             .map(|claim| ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -10051,6 +10387,7 @@ mod tests {
                 "17 references must still fail"
             );
             let synthesized = SynthesizedDocument {
+                whole_document_progress: None,
                 contract_extraction: None,
                 document_id: analyzed.document_id.clone(),
                 synthesis_version: HIERARCHICAL_SYNTHESIS_VERSION.into(),
@@ -11010,6 +11347,7 @@ mod tests {
             warnings: vec![],
         };
         let synthesized = SynthesizedDocument {
+            whole_document_progress: None,
             contract_extraction: None,
             document_id: normalized.document_id.clone(),
             synthesis_version: LEGACY_SYNTHESIS_VERSION.to_string(),
@@ -11497,6 +11835,7 @@ mod tests {
         }
 
         let mut verifications = vec![ClaimVerification {
+            admission_withhold: None,
             claim_id: "claim-1".into(),
             evidence_ids: vec!["evidence-1".into(), "evidence-2".into()],
             verdict: ClaimVerdict::Supported,
@@ -11593,6 +11932,7 @@ mod tests {
         let mut verifications = claims
             .iter()
             .map(|claim| ClaimVerification {
+                admission_withhold: None,
                 claim_id: claim.claim_id.clone(),
                 evidence_ids: claim.evidence_ids.clone(),
                 verdict: ClaimVerdict::Supported,
@@ -12841,6 +13181,7 @@ mod tests {
     #[test]
     fn verification_preserves_analysis_shortfall_and_replaces_only_verification_warnings() {
         let synthesized = SynthesizedDocument {
+            whole_document_progress: None,
             contract_extraction: None,
             document_id: "warning-fixture".into(),
             synthesis_version: SYNTHESIS_VERSION.into(),
@@ -12925,6 +13266,7 @@ mod tests {
         );
 
         let mut checkpoint = SynthesizedDocument {
+            whole_document_progress: None,
             contract_extraction: None,
             document_id: "document".into(),
             synthesis_version: SYNTHESIS_VERSION.into(),
@@ -13326,6 +13668,7 @@ mod tests {
                 )
             } else {
                 SynthesizedDocument {
+        whole_document_progress: None,
                 contract_extraction: None,
                 document_id: analyzed.document_id.clone(),
                 synthesis_version: SYNTHESIS_VERSION.into(),
@@ -13355,6 +13698,7 @@ mod tests {
                 .claims
                 .iter()
                 .map(|c| ClaimVerification {
+                    admission_withhold: None,
                     claim_id: c.claim_id.clone(),
                     evidence_ids: c.evidence_ids.clone(),
                     verdict: ClaimVerdict::Supported,
@@ -13364,6 +13708,7 @@ mod tests {
                 .summary_claims
                 .iter()
                 .map(|c| ClaimVerification {
+                    admission_withhold: None,
                     claim_id: c.claim_id.clone(),
                     evidence_ids: c.evidence_ids.clone(),
                     verdict: ClaimVerdict::Supported,

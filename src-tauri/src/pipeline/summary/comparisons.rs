@@ -1,6 +1,47 @@
 //! Bounded, source-owned C9 comparisons for General prose verification.
 use super::*;
+use crate::pipeline::contracts::{AdmissionLimits, AdmissionWithhold, AdmissionWithholdReason};
 use std::collections::BTreeSet;
+
+#[derive(Debug)]
+struct CapacityExcess {
+    reason: AdmissionWithholdReason,
+    observed: usize,
+    minimum: usize,
+    maximum: usize,
+}
+
+#[derive(Debug)]
+enum PreparationFailure {
+    Invalid(PipelineFailure),
+    Capacity(CapacityExcess),
+}
+impl From<PipelineFailure> for PreparationFailure {
+    fn from(value: PipelineFailure) -> Self {
+        Self::Invalid(value)
+    }
+}
+impl PreparationFailure {
+    #[cfg(test)]
+    fn into_pipeline(self) -> PipelineFailure {
+        match self {
+            Self::Invalid(failure) => failure,
+            Self::Capacity(_) => too_large(),
+        }
+    }
+}
+fn capacity(
+    reason: AdmissionWithholdReason,
+    observed: usize,
+    maximum: usize,
+) -> PreparationFailure {
+    PreparationFailure::Capacity(CapacityExcess {
+        reason,
+        observed,
+        minimum: 0,
+        maximum,
+    })
+}
 
 pub(super) const SCHEMA_NAME: &str = crate::pipeline::contracts::CLAIM_COMPARISON_SCHEMA_NAME;
 const MAX_INPUT_CHARACTERS: usize = 4096;
@@ -97,7 +138,16 @@ fn whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 
+#[cfg(test)]
 fn span_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
+    bounded_span_catalog(texts, AdmissionWithholdReason::SourceEnumValues)
+        .map_err(PreparationFailure::into_pipeline)
+}
+
+fn bounded_span_catalog(
+    texts: &[&str],
+    reason: AdmissionWithholdReason,
+) -> Result<BTreeSet<String>, PreparationFailure> {
     let mut values = BTreeSet::new();
     for text in texts {
         let mut tokens: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -120,13 +170,18 @@ fn span_catalog(texts: &[&str]) -> Result<BTreeSet<String>, PipelineFailure> {
                 }
                 values.insert(text[start.0..end.1].to_string());
                 if values.len() > MAX_ENUM_VALUES {
-                    return Err(too_large());
+                    return Err(capacity(reason, values.len(), MAX_ENUM_VALUES));
                 }
             }
         }
     }
     if values.is_empty() {
-        return Err(too_large());
+        return Err(PreparationFailure::Capacity(CapacityExcess {
+            reason,
+            observed: 0,
+            minimum: 1,
+            maximum: MAX_ENUM_VALUES,
+        }));
     }
     Ok(values)
 }
@@ -144,9 +199,17 @@ fn strict_object(properties: Value, required: &[&str]) -> Value {
 }
 
 impl Prepared {
+    #[cfg(test)]
     fn new(input: &PromptVerificationClaim, schema_limit: usize) -> Result<Self, PipelineFailure> {
+        Self::prepare(input, schema_limit).map_err(PreparationFailure::into_pipeline)
+    }
+
+    fn prepare(
+        input: &PromptVerificationClaim,
+        schema_limit: usize,
+    ) -> Result<Self, PreparationFailure> {
         if input.text.trim().is_empty() || input.evidence.is_empty() {
-            return Err(invalid_input());
+            return Err(invalid_input().into());
         }
         let mut seen = HashSet::new();
         let mut sources = Vec::new();
@@ -156,19 +219,35 @@ impl Prepared {
                 || evidence.exact_quote.trim().is_empty()
                 || !source.contains(&evidence.exact_quote)
             {
-                return Err(invalid_input());
+                return Err(invalid_input().into());
             }
             if seen.insert(source) {
                 sources.push(source);
             }
         }
-        if input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>()
-            > MAX_INPUT_CHARACTERS
-        {
-            return Err(too_large());
+        for source in &sources {
+            let length = source.chars().count();
+            if length > MAX_INPUT_CHARACTERS {
+                return Err(capacity(
+                    AdmissionWithholdReason::GoverningClauseScalars,
+                    length,
+                    MAX_INPUT_CHARACTERS,
+                ));
+            }
         }
-        let source_spans = span_catalog(&sources)?;
-        let claim_spans = span_catalog(&[&input.text])?;
+        let length =
+            input.text.chars().count() + sources.iter().map(|s| s.chars().count()).sum::<usize>();
+        if length > MAX_INPUT_CHARACTERS {
+            return Err(capacity(
+                AdmissionWithholdReason::CombinedScalars,
+                length,
+                MAX_INPUT_CHARACTERS,
+            ));
+        }
+        let source_spans =
+            bounded_span_catalog(&sources, AdmissionWithholdReason::SourceEnumValues)?;
+        let claim_spans =
+            bounded_span_catalog(&[&input.text], AdmissionWithholdReason::ClaimEnumValues)?;
         let comparison = strict_object(
             json!({
                 "source_spans":{"type":"array", "items":{"$ref":"#/$defs/source_span"}, "minItems":0,"maxItems":MAX_SPANS},
@@ -196,12 +275,15 @@ impl Prepared {
             "claim_span":{"type":"string","enum":claim_spans}
         });
         let limit = schema_limit.min(crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES);
-        if serde_json::to_vec(&schema)
+        let schema_bytes = serde_json::to_vec(&schema)
             .map_err(|_| invalid_input())?
-            .len()
-            > limit
-        {
-            return Err(too_large());
+            .len();
+        if schema_bytes > limit {
+            return Err(capacity(
+                AdmissionWithholdReason::SchemaBytes,
+                schema_bytes,
+                limit,
+            ));
         }
         Ok(Self {
             claim: CitedClaim {
@@ -246,6 +328,7 @@ impl Prepared {
             preserved |= comparison.relation == Relation::Preserved;
         }
         Ok(ClaimVerification {
+            admission_withhold: None,
             claim_id: claim.claim_id.clone(),
             evidence_ids: claim.evidence_ids.clone(),
             verdict: if changed {
@@ -373,6 +456,96 @@ pub(super) fn classify(
     Ok(verdicts)
 }
 
+pub(super) fn limits_for_runtime(runtime: &dyn ModelRuntime) -> AdmissionLimits {
+    AdmissionLimits {
+        context_tokens: runtime.context_tokens(PipelineStage::Verify),
+        schema_bytes: runtime
+            .response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME)
+            .min(crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES),
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum AdmissionEntry {
+    Admitted(Box<VerificationBatch>),
+    Withheld(ClaimVerification),
+}
+#[derive(Debug)]
+pub(super) struct AdmissionPlan {
+    pub entries: Vec<AdmissionEntry>,
+}
+impl AdmissionPlan {
+    fn require_all_admitted(self) -> Result<Vec<VerificationBatch>, PipelineFailure> {
+        self.entries
+            .into_iter()
+            .map(|entry| match entry {
+                AdmissionEntry::Admitted(batch) => Ok(*batch),
+                AdmissionEntry::Withheld(_) => Err(too_large()),
+            })
+            .collect()
+    }
+
+    pub(super) fn preflight(
+        &self,
+        runtime: &dyn ModelRuntime,
+        seed: u64,
+        first_ordinal: u32,
+        control: &dyn ExecutionControl,
+    ) -> Result<(), PipelineFailure> {
+        let mut ordinal = first_ordinal;
+        for entry in &self.entries {
+            if let AdmissionEntry::Admitted(batch) = entry {
+                cancellation_checkpoint(control, PipelineStage::Verify)?;
+                let next = reserve_model_request_ordinal(&mut ordinal, PipelineStage::Verify)?;
+                runtime
+                    .preflight_request(&verification_request(batch, next, seed))
+                    .map_err(|failure| {
+                        runtime_pipeline_failure(
+                            PipelineStage::Verify,
+                            "MODEL_VERIFICATION_ADMISSION",
+                            failure,
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn classify(
+        self,
+        runtime: &dyn ModelRuntime,
+        seed: u64,
+        next_ordinal: &mut u32,
+        control: &dyn ExecutionControl,
+    ) -> Result<Vec<ClaimVerification>, PipelineFailure> {
+        let mut slots = Vec::new();
+        let mut batches = Vec::new();
+        for entry in self.entries {
+            match entry {
+                AdmissionEntry::Admitted(batch) => {
+                    slots.push(None);
+                    batches.push(*batch);
+                }
+                AdmissionEntry::Withheld(held) => slots.push(Some(held)),
+            }
+        }
+        let mut generated = if batches.is_empty() {
+            vec![]
+        } else {
+            classify_verification_batches(runtime, batches, seed, next_ordinal, control)?
+        }
+        .into_iter();
+        let results = slots
+            .into_iter()
+            .map(|slot| slot.map_or_else(|| generated.next().ok_or_else(invalid_response), Ok))
+            .collect::<Result<Vec<_>, _>>()?;
+        if generated.next().is_some() {
+            return Err(invalid_response());
+        }
+        Ok(results)
+    }
+}
+
 pub(super) fn plan(
     runtime: &dyn ModelRuntime,
     prompt: &VerificationPrompt,
@@ -380,8 +553,44 @@ pub(super) fn plan(
     claim_budget: usize,
 ) -> Result<Vec<VerificationBatch>, PipelineFailure> {
     require_candidate_enabled()?;
+    plan_for_limits(
+        prompt,
+        claims,
+        claim_budget,
+        &limits_for_runtime(runtime),
+        true,
+        runtime.supports_response_schema(SCHEMA_NAME),
+    )?
+    .require_all_admitted()
+}
+
+pub(super) fn plan_admissions(
+    runtime: &dyn ModelRuntime,
+    prompt: &VerificationPrompt,
+    claims: &[CitedClaim],
+    claim_budget: usize,
+) -> Result<AdmissionPlan, PipelineFailure> {
+    require_candidate_enabled()?;
+    plan_for_limits(
+        prompt,
+        claims,
+        claim_budget,
+        &limits_for_runtime(runtime),
+        false,
+        runtime.supports_response_schema(SCHEMA_NAME),
+    )
+}
+
+pub(super) fn plan_for_limits(
+    prompt: &VerificationPrompt,
+    claims: &[CitedClaim],
+    claim_budget: usize,
+    limits: &AdmissionLimits,
+    allow_quote_fallback: bool,
+    protocol_supported: bool,
+) -> Result<AdmissionPlan, PipelineFailure> {
     validate_verification_claim_catalog(prompt, claims, claim_budget)?;
-    if !runtime.supports_response_schema(SCHEMA_NAME) {
+    if !protocol_supported {
         return Err(stage_failure(
             PipelineStage::Verify,
             "VERIFICATION_PROTOCOL_UNSUPPORTED",
@@ -390,51 +599,93 @@ pub(super) fn plan(
         ));
     }
     ensure_verification_batch_count(claims.len())?;
-    let request_limit = verification_request_character_limit(
-        runtime.context_tokens(PipelineStage::Verify),
-        VERIFICATION_OUTPUT_TOKENS,
-    )?;
-    prompt
-        .claims
-        .iter()
-        .zip(claims)
-        .map(|(input, claim)| {
-            let mut input = input.clone();
-            // The source owner may have no larger clause. Keep the exact quotation;
-            // never borrow another claim's context or silently shorten a clause.
-            for evidence in &mut input.evidence {
-                if evidence.full_clause.is_none() {
-                    evidence.full_clause = Some(evidence.exact_quote.clone());
+    let request_limit =
+        verification_request_character_limit(limits.context_tokens, VERIFICATION_OUTPUT_TOKENS)?;
+    if limits.schema_bytes > crate::pipeline::contracts::MAX_CLAIM_COMPARISON_SCHEMA_BYTES {
+        return Err(invalid_input());
+    }
+    let mut entries = Vec::new();
+    for (input, claim) in prompt.claims.iter().zip(claims) {
+        let mut input = input.clone();
+        for evidence in &mut input.evidence {
+            if evidence.full_clause.is_none() {
+                if !allow_quote_fallback {
+                    return Err(invalid_input());
                 }
+                evidence.full_clause = Some(evidence.exact_quote.clone());
             }
-            let prepared = Prepared::new(
-                &input,
-                runtime.response_schema_byte_limit(PipelineStage::Verify, SCHEMA_NAME),
-            )?;
-            let mut system_prompt = format!(
-                "{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}"
-            );
-            if input.source_framing.is_some() {
-                system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
+        }
+        let owned = input
+            .evidence
+            .iter()
+            .map(|e| (&e.evidence_id, &e.exact_quote, &e.full_clause))
+            .collect::<Vec<_>>();
+        let input_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(&input.claim_id, &input.text, &input.source_framing, owned))
+                    .map_err(|_| invalid_input())?
+            )
+        );
+        let held = |excess: CapacityExcess| {
+            AdmissionEntry::Withheld(ClaimVerification {
+                claim_id: claim.claim_id.clone(),
+                evidence_ids: claim.evidence_ids.clone(),
+                verdict: ClaimVerdict::Ambiguous,
+                admission_withhold: Some(AdmissionWithhold {
+                    verification_version: WHOLE_DOCUMENT_VERIFICATION_VERSION.into(),
+                    input_sha256: input_sha256.clone(),
+                    limits: limits.clone(),
+                    reason: excess.reason,
+                    observed: excess.observed,
+                    minimum: excess.minimum,
+                    maximum: excess.maximum,
+                }),
+            })
+        };
+        let prepared = match Prepared::prepare(&input, limits.schema_bytes) {
+            Ok(prepared) => prepared,
+            Err(PreparationFailure::Capacity(excess)) => {
+                if allow_quote_fallback {
+                    return Err(too_large());
+                }
+                entries.push(held(excess));
+                continue;
             }
-            let (user_prompt, identifiers) =
-                identifiers::verification_prompt(&[input]).map_err(|_| invalid_input())?;
-            let model_facing_characters =
-                system_prompt.chars().count() + user_prompt.chars().count();
-            if !verification_request_within_bounds(1, model_facing_characters, request_limit) {
+            Err(PreparationFailure::Invalid(failure)) => return Err(failure),
+        };
+        let mut system_prompt = format!(
+            "{VERIFICATION_ENTAILMENT_INSTRUCTION}{CLAUSE_VERIFICATION_INSTRUCTION}\n{INSTRUCTION}"
+        );
+        if input.source_framing.is_some() {
+            system_prompt.push_str(SOURCE_FRAMING_VERIFICATION_INSTRUCTION);
+        }
+        let (user_prompt, identifiers) =
+            identifiers::verification_prompt(&[input]).map_err(|_| invalid_input())?;
+        let model_facing_characters = system_prompt.chars().count() + user_prompt.chars().count();
+        if !verification_request_within_bounds(1, model_facing_characters, request_limit) {
+            if allow_quote_fallback {
                 return Err(too_large());
             }
-            Ok(VerificationBatch {
-                system_prompt,
-                user_prompt,
-                claims: vec![claim.clone()],
-                identifiers,
-                comparison: Some(prepared),
-                #[cfg(test)]
-                model_facing_characters,
-            })
-        })
-        .collect()
+            entries.push(held(CapacityExcess {
+                reason: AdmissionWithholdReason::RequestCharacters,
+                observed: model_facing_characters,
+                minimum: 0,
+                maximum: request_limit,
+            }));
+            continue;
+        }
+        entries.push(AdmissionEntry::Admitted(Box::new(VerificationBatch {
+            system_prompt,
+            user_prompt,
+            claims: vec![claim.clone()],
+            identifiers,
+            comparison: Some(prepared),
+            #[cfg(test)]
+            model_facing_characters,
+        })));
+    }
+    Ok(AdmissionPlan { entries })
 }
 
 #[cfg(test)]
@@ -460,6 +711,19 @@ pub(super) fn fixture_verdict_response(request: &ModelRequest, verdict: ClaimVer
         "source_spans":[source], "claim_spans":[claim], "relation":match verdict { ClaimVerdict::Supported => "preserved", ClaimVerdict::Unsupported => "changed", ClaimVerdict::Ambiguous => "uncertain" }
     }))).collect();
     json!({"verdicts":[{"claim_id":"k1","comparisons":comparisons}]}).to_string()
+}
+
+#[cfg(test)]
+pub(super) fn readiness_catalog_size(texts: &[&str]) -> Result<usize, PipelineFailure> {
+    span_catalog(texts).map(|catalog| catalog.len())
+}
+
+#[cfg(test)]
+pub(super) fn readiness_prepared_admits(
+    input: &PromptVerificationClaim,
+    schema_limit: usize,
+) -> bool {
+    Prepared::new(input, schema_limit).is_ok()
 }
 
 #[cfg(test)]

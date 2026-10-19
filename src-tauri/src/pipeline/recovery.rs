@@ -55,6 +55,9 @@ fn stage_label(stage: &PipelineStage) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) use tests::seed_admitted_ocr_child;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::contracts::{ContinuationCheckpoint, PipelineEvent, PipelineState};
@@ -79,10 +82,6 @@ mod tests {
             ));
             fs::write(&path, contents).expect("test path should be writable");
             Self(path)
-        }
-
-        fn empty(extension: &str) -> Self {
-            Self::new(extension, b"")
         }
     }
 
@@ -138,31 +137,37 @@ mod tests {
         .expect("admitted OCR ownership should persist");
     }
 
+    pub(crate) fn seed_admitted_ocr_child(
+        conn: &mut Connection,
+        source: &str,
+    ) -> (PipelineRun, PipelineRun) {
+        let (_, root) = ingest_pdf(conn, source).expect("root should ingest");
+        let (_, child) = ingest_pdf(conn, source).expect("child should ingest");
+        let (parsing, document) =
+            db::start_parsing(conn, &child.run_id, child.state_version).unwrap();
+        parse_started_document(
+            conn,
+            &PdfExtractParser::new(),
+            &child.run_id,
+            parsing.state_version,
+            &document,
+        )
+        .unwrap();
+        let parsed = get_pipeline_run(conn, &child.run_id).unwrap().unwrap();
+        let normalizing = db::start_normalizing(conn, &child.run_id, parsed.state_version)
+            .unwrap()
+            .0;
+        insert_admitted_ocr_handoff(conn, &root, &normalizing);
+        (root, normalizing)
+    }
+
     #[test]
     fn ocr_review_regression_active_child_keeps_restart_ownership() {
         let mut conn = init_db(":memory:").expect("database should initialize");
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf");
         let source = source.to_str().expect("fixture path should be UTF-8");
-        let (_, root) = ingest_pdf(&mut conn, source).expect("root should ingest");
-        let (_, child) = ingest_pdf(&mut conn, source).expect("child should ingest");
-        let (parsing, document) = db::start_parsing(&mut conn, &child.run_id, child.state_version)
-            .expect("child parsing should start");
-        parse_started_document(
-            &mut conn,
-            &PdfExtractParser::new(),
-            &child.run_id,
-            parsing.state_version,
-            &document,
-        )
-        .expect("child parsing should complete");
-        let parsed = get_pipeline_run(&conn, &child.run_id)
-            .expect("child should reload")
-            .expect("child should exist");
-        let normalizing = db::start_normalizing(&mut conn, &child.run_id, parsed.state_version)
-            .expect("child normalization should start")
-            .0;
-        insert_admitted_ocr_handoff(&conn, &root, &normalizing);
+        let (_, normalizing) = seed_admitted_ocr_child(&mut conn, source);
 
         let ordinary = {
             let (_, ingested) = ingest_pdf(&mut conn, source).expect("ordinary run should ingest");
@@ -242,7 +247,7 @@ mod tests {
     #[test]
     fn interrupted_run_is_failed_once_and_survives_independent_reopen() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nRECOVERY_SOURCE_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let (stable, parsing, document, events_before) = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let (document, stable) = ingest_pdf(
@@ -331,7 +336,7 @@ mod tests {
     #[test]
     fn interrupted_cancellation_completes_once_after_independent_reopen() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nCANCELLATION_RECOVERY_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let cancelling = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let parsing = start_parsing_run(&mut conn, &source);
@@ -372,7 +377,7 @@ mod tests {
     #[test]
     fn recovery_rejects_cancelling_state_without_durable_request_flag() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nINVALID_CANCELLATION_RECOVERY");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let cancelling = {
             let mut conn = init_db(&database.0).expect("database should initialize");
             let parsing = start_parsing_run(&mut conn, &source);
@@ -544,7 +549,7 @@ mod tests {
     #[test]
     fn stale_recovery_snapshot_cannot_overwrite_a_newer_failure() {
         let source = TestPath::new("pdf", b"%PDF-1.4\nRECOVERY_CAS_BYTES");
-        let database = TestPath::empty("db");
+        let database = crate::test_store::DatabaseFixture::new();
         let mut caller_a = init_db(&database.0).expect("database should initialize");
         let parsing = start_parsing_run(&mut caller_a, &source);
         let mut caller_b = init_db(&database.0).expect("second connection should open");
