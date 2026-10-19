@@ -156,7 +156,7 @@ fn initialism(word: &str) -> bool {
 
 // Qualified names are read structurally. No document/law name or abbreviation
 // vocabulary supplies an identity. A bare capitalized name is never scanned.
-fn explicit_document_word(word: &str) -> bool {
+pub(super) fn explicit_document_word(word: &str) -> bool {
     matches!(
         word.trim_end_matches('.').to_ascii_lowercase().as_str(),
         "document" | "agreement" | "contract"
@@ -657,7 +657,7 @@ fn resolve(
     }
 }
 
-fn identity_words(text: &str) -> Vec<String> {
+pub(super) fn identity_words(text: &str) -> Vec<String> {
     tokens(text)
         .iter()
         .map(|t| t.text.trim_end_matches('.').to_lowercase())
@@ -665,18 +665,19 @@ fn identity_words(text: &str) -> Vec<String> {
 }
 
 fn owned_namespace_origin(
-    name: &str,
+    namespace: &QualifiedNamespace,
     clauses: &[SourceClause],
     identities: &[SourceIdentity],
 ) -> Option<Result<usize, &'static str>> {
-    let identity = identity_words(name);
+    let identity = identity_words(namespace.name());
     if identity.is_empty() {
         return Some(Err("ambiguous_document_qualifier"));
     }
     let mentions = |text: &str| {
-        identity_words(text)
-            .windows(identity.len())
-            .any(|words| words == identity)
+        matches!(namespace, QualifiedNamespace::OpaqueName(_))
+            && identity_words(text)
+                .windows(identity.len())
+                .any(|words| words == identity)
     };
     let exact = |text: &str| identity_words(text) == identity;
     let mut scopes = HashSet::new();
@@ -796,7 +797,8 @@ impl DependencyProjection {
                     ) {
                         if let Some(namespace) = &reference.namespace {
                             let name = namespace.name();
-                            if let Some(owner) = owned_namespace_origin(name, &clauses, &identities)
+                            if let Some(owner) =
+                                owned_namespace_origin(namespace, &clauses, &identities)
                             {
                                 if targets.is_empty() {
                                     reference.status =
