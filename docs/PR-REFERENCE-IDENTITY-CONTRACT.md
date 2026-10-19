@@ -9,9 +9,9 @@ Use branch `codex/reference-identity-containment`, with PR base
 `codex/c9-qualification-readiness`. Do not merge this branch into that base.
 
 The operator directly confirmed the containment proposal in this coding chat:
-**"Confirm outside-text rule"**. That policy is accepted. The additional
-parenthetical self-name grammar below is PROPOSED pending direct acceptance.
-No source or test implementation precedes that acceptance. No model calls.
+**"Confirm outside-text rule"**. That policy is accepted. The operator also directly accepted the
+self-alias scope: **"Accept self-alias repair"**. Both changes below are accepted.
+No model calls are authorised.
 
 ## Root cause
 
@@ -108,7 +108,7 @@ new qualification, production adoption, ready claim or merge-hold clearance.
 Unrecognised legal-name forms are not promised general semantic resolution.
 Deferred packing/recovery/diagnostic hardening is not part of this PR.
 
-**NOT DONE:** direct acceptance of the proposed self-alias grammar is pending;
-source/tests, fail-first and repaired proof, frozen delta, cold diff audit,
-publication and independent exact-head review remain. Containment acceptance
-alone does not authorise a different alias grammar by implication.
+**NOT DONE:** the contract is accepted; source/tests, fail-first and repaired
+proof, frozen delta, cold diff audit,
+publication and independent exact-head review remain. Acceptance covers only the self-alias grammar above, not general legal-name
+interpretation or runtime qualification.
