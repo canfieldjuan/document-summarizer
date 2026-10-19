@@ -841,12 +841,16 @@ fn contract_source_inventory(
     }
     // Retain identity from the already-read lines even when a standalone title
     // is packed into another unit. Do not recover it by re-scanning output.
+    let mut opening_titles = Vec::new();
     let identities = lines
         .iter()
         .zip(&read)
         .filter_map(|(fragment, read)| {
             let text = line_text(fragment);
-            if let Some(name) = declared_source_name(text) {
+            if read.opening_identity && read.title {
+                opening_titles.push(text);
+            }
+            if let Some(name) = declared_source_name(text, &opening_titles) {
                 return Some(if read.opening_identity {
                     SourceIdentity::Declared(name.to_owned())
                 } else {
@@ -1056,8 +1060,34 @@ fn contract_source_inventory(
 
 // Explicit self-declarations, independent of any contract/law title vocabulary.
 // An unrecognized declaration never supplies a guessed local binding.
-fn declared_source_name(text: &str) -> Option<&str> {
+fn declared_source_name<'a>(text: &'a str, opening_titles: &[&str]) -> Option<&'a str> {
     let lower = text.to_ascii_lowercase();
+    if lower.starts_with("this ") {
+        if let Some((subject, tail)) = text[5..].split_once('(') {
+            let subject = subject.trim();
+            let self_subject = dependencies::explicit_document_word(subject)
+                || opening_titles.iter().any(|title| {
+                    dependencies::identity_words(title) == dependencies::identity_words(subject)
+                });
+            let tail = tail.trim_start();
+            if self_subject && tail.to_ascii_lowercase().starts_with("the ") {
+                let quoted = tail[4..].trim_start();
+                let (open, close) = match quoted.chars().next() {
+                    Some('“') => ('“', '”'),
+                    Some('"') => ('"', '"'),
+                    _ => return None,
+                };
+                let (name, after) = quoted[open.len_utf8()..].split_once(close)?;
+                if !name.trim().is_empty()
+                    && !name.contains(['(', ')', '“', '”', '"', '\n'])
+                    && after.trim_start().starts_with(')')
+                {
+                    return Some(name.trim());
+                }
+                return None;
+            }
+        }
+    }
     let (prefix, separator) = if lower.starts_with("the name of this ") {
         ("the name of this ", " is ")
     } else if lower.starts_with("this ") {
