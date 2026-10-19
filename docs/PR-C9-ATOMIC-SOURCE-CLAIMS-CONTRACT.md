@@ -977,3 +977,68 @@ amendment's boundary/invalid/stale/reload proofs and remaining original offline
 build. The one code push and exact-head review wait for the complete original
 C9/SAME60/full gates. PR116, production, live, merge, ready and freeze holds all
 remain unchanged. No live budget is granted.
+
+## Accepted source repairs and required baseline gate
+
+Operator direction in this session: “remove the unnecessary constraints at the
+source and use the proven preproduction setup as our baseline. Keep the fidelity
+checks and prove the repairs before we run the model.” The subsequent direction
+requires enforcing reuse of that proof rather than relying on reminders.
+
+Root cause: writer `0e8ce54b` applies the document-wide 64-claim ceiling to every
+section, then the response estimator reserves that whole shape. The frozen
+input-A rejected unit uses 12,173 framed input tokens, leaving 20,083 output
+tokens; the 64-claim reservation costs 23,243. The same estimator fits 55 complete
+1,200-character claims. Of 191 A units, none lacks room for one full claim.
+The second STOP originates in the dependency owner: after removal of the title
+word lookup, an explicit named qualifier is ambiguous and blocks two dependent
+units, which the constructor escalates to whole-document failure.
+
+Required change surface:
+
+- The section planner derives its claim count from real admitted output space
+  at the full existing character allowance; its prompt, schema, parser and saved
+  validation agree on that count. The final document ceiling stays unchanged.
+  A response filling its section allowance is not proof of complete coverage:
+  split complete primary units and re-plan, retain the superseded response and
+  forward-only durable ownership, and STOP on indivisible saturation. Do not
+  clip claims, drop context, retry the same request, or deliver a silent subset.
+- At the existing dependency resolver, an explicit `<kind> <n> of the <Name>`
+  qualifies as an unowned named external only if neither the numbered target nor
+  a declared document, annex/part or heading identity is owned. Any partial match
+  remains blocking unless it resolves cleanly. Use structural ownership, no
+  title-word/statute lexicon. Carry the existing external disclosure through
+  source coverage; never assert absent text's content.
+- Extend the existing qualification script with a mandatory offline baseline
+  receipt and checker. Pin the existing frozen summary captures and writer
+  input inventory; reuse the accepted counter, source gate, capacity, assembly,
+  archived C9 and SAME60 owners. A receipt binds relevant source bytes, frozen
+  inputs, commands and output hashes. Missing/stale/failed/partial proof or zero
+  matching tests cannot pass. The supported writer launch path and local push
+  hook require that proof. CI tests the gate's refusal cases and public runtime
+  regressions; private text is never copied into GitHub or CI. Preserve any
+  existing hooks. This is a workflow guardrail, not an anti-bypass security claim.
+
+Baseline and departures: the preserved `summary_run.py`, wire captures and native
+summary manifest above remain the reference: full text, 32,768 context, 1,500
+output tokens and free prose. This candidate deliberately retains atomic claim
+JSON, source citations, complete governing dependencies, deterministic assembly
+and C9 verification. Those are fidelity requirements, not model capability
+claims. No prompt/framing/model/sampler/slot change is authorized by this repair.
+The historical 1,200-character and document-count bounds stay explicit safety
+policies; removing the erroneous per-section reservation does not qualify a
+larger model window or claim ceiling.
+
+Verification: fail-first public reservation and external-identity regressions;
+owned-name, owned-number, mixed, ambiguous, unsupported, empty and boundary
+twins; saturated multi-unit split and indivisible STOP; DB reload/CAS/no-redo
+tests; causal mutants; both frozen inputs plus public capacity control through
+the approved offline counter; exact assembly/citation preservation and unchanged
+historical C9/SAME60 lists. Gate tests must reject missing, stale, changed-input,
+tampered-artifact and zero-test receipts before dispatch/publication. Run adjacent
+Rust/Python, strict format/Clippy and applicable Windows compile checks, then one
+grouped push with the Windows repair and independent exact-head review.
+
+Non-scope: no model calls, GPU/server startup, new generation budget, fidelity
+threshold changes, private-label tuning, partial delivery, ordinary-build
+enablement, production adoption, ready or merge clearance. Existing holds remain.
