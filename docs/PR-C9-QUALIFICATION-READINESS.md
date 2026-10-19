@@ -692,3 +692,76 @@ Durable namespace `writer-review-repair-20261018`,
 before/after logs, source freeze and per-hunk cold diff audit. The remaining
 independent writer-review findings are grouped with this repair before one
 push. All live, production, ready and merge holds remain unchanged.
+
+## Consolidated writer repair and mandatory baseline proof
+
+Tested source: `fc41d12e5e1c9b8e7ab500ec562161f25925d0e1`. Contract-only
+commits `318fb79` and `a5fdd10` record the source repairs, enforcement and
+conditional reference-rule acceptance (PR132 comment 6257990966). This follow-up
+changes prose only and reuses that exact tested source; it grants no model run.
+
+### Reproduce, isolate, explain and repair
+
+- My writer implementation `0e8ce54b` reserved the final document's entire claim
+  allowance in each section. `whole_document.rs:1149` now derives the section
+  count from admitted output space, retaining the full 1,200-character allowance
+  and complete governing context. Saturated responses are retained and complete
+  primary units are split with durable forward-only ownership; indivisible
+  saturation stops. It never treats a full response as complete coverage.
+- The source reader/resolver removes the bare-name and statute-vocabulary
+  shortcuts. Ownership at `whole_clauses/dependencies.rs:670` precedes external
+  classification. Existing explicit-document forms remain distinct from new
+  opaque names; no word/role list was added. The local candidate `125837d` also
+  blocked clean owned references. A failing public reproduction established that
+  omission; `owned_namespace_origin` at line 695 now resolves the owning main or
+  annex numbering scope. Malformed targets remain blocking rather than
+  disappearing or being accepted as whole sections. Both fail-before logs and
+  passing regressions are retained.
+- Source-owned external/absent-attachment notices reach final coverage warnings
+  (`whole_document.rs:351`) and saved validation. The UI uses `textContent`
+  (`src/main.ts:1574`); no output-text re-scan or content claim is introduced.
+- Actual consumer tests exercise unresolved dependency rejection at
+  `whole_document.rs:93` and exact text/evidence/governing-source identity at
+  `claim_signature` (line 1088). Their bypass/dedup mutants fail. Final reference
+  controls also kill a mutant for each accepted branch and for dropped malformed
+  targets. The source is restored after every mutation.
+- The Windows constructor owner (`desktop.rs:142`) is available to every test
+  target, preserving the portable caller. No test is excluded on Windows.
+
+### Reused proof and enforcement
+
+The existing `c9-preproduction-parity.py` owns the offline receipt. Its original
+counter, frozen source gate, capacity planner, exact assembler, rejected
+consolidation boundary, archived C9 and complete SAME60 checks all passed, with
+zero model calls. A wrong SAME60 selector first exercised zero tests; the gate
+refused to issue a receipt. The registered selector was corrected, then the
+entire gate passed. The installed native Git hook accepted the resulting receipt
+and previously refused missing proof. Launchers require the same receipt before
+side effects. Missing/stale inputs, changed source/results and zero-test runs
+are refusal cases exercised in CI's Python suite. These are workflow guardrails,
+not an anti-bypass security claim or a replacement for fidelity qualification.
+
+Fresh source measurement: input A has 34 resolved / 3 external / 0 unresolved,
+input B has 20 / 10 / 0; neither has blocked units. The full redacted change list
+contains 27 removed bare-name records on A and one external reason-code change
+on B. Resolved bindings, fragments and closures remain unchanged. Initial
+section allowances are A: 8 and 11; B: 36; public control: 7 and 37, each at the
+full character allowance. These are planning measurements, not model capacity
+or fidelity claims. Saturation behavior remains part of the accepted contract.
+
+Readiness: 71 passed / 5 ignored. Python: 43 passed. Integration targets:
+5 passed; 20 passed / 3 ignored; 26 passed. Strict Clippy, formatting and Windows
+GNU lib/test checking passed. The broad Rust run is **not green**: 1046 passed /
+1 failed / 40 ignored, in the unchanged gateway store test; its isolated run
+passed. Issue140 comment 6258119994 retains the failure. No store fix is claimed
+and no assertion, timeout or retry was weakened. Native Windows CI and renewed
+independent exact-head review remain pending.
+
+Durable alias `writer-review-repair-20261018/repair-consolidation-final.json`,
+SHA256 `0daec319d64037b7bc13471974d8e7ba074db4eb2903b6806056a5aec3eb77dd`,
+binds the failures, owner repairs, mutations, cold audit and verification logs.
+The private offline receipt SHA256 is
+`7631f8eaf61e45c221fcb656b48295d221ba91c4a2e1726605a6273c3460f632`;
+the complete SAME60 result remains
+`ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53`.
+**NOT DONE for qualification, production or merge.** All existing holds remain.
