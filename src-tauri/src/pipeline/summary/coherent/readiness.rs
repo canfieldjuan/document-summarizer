@@ -1590,6 +1590,7 @@ fn whole_writer_request_must_bind_new_protocol_and_system_prompt() {
 // a tokenizer or evidence of native capacity; the shared budget owner calls it.
 struct WriterProjectionRuntime {
     maximum_prompt_bytes: usize,
+    context_tokens: u32,
     failure: Option<&'static str>,
     preflights: AtomicUsize,
 }
@@ -1597,6 +1598,7 @@ impl WriterProjectionRuntime {
     fn new(maximum_prompt_bytes: usize) -> Self {
         Self {
             maximum_prompt_bytes,
+            context_tokens: 32_768,
             failure: None,
             preflights: AtomicUsize::new(0),
         }
@@ -1616,7 +1618,7 @@ impl ModelRuntime for WriterProjectionRuntime {
         "controlled-writer-admission"
     }
     fn context_tokens(&self, _: PipelineStage) -> u32 {
-        32_768
+        self.context_tokens
     }
     fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
         self.preflights.fetch_add(1, Ordering::SeqCst);
@@ -3727,7 +3729,7 @@ fn review132_named_qualifiers_use_syntax_not_document_vocabulary() {
             .contains("unrelated local rule"));
     }
     let normalized = public_document(&[
-        "Section 1 Scope\nEquipment follows Section 7 of this Lease.".into(),
+        "Section 1 Scope\nEquipment follows Section 7 of this Document.".into(),
         "Section 7 Local\nThe local rule applies.".into(),
     ]);
     let projection = DependencyProjection::new(&normalized);
@@ -3781,25 +3783,99 @@ fn review132_capitalized_titles_do_not_prove_external_document_identity() {
         ]);
         let projection = DependencyProjection::new(&normalized);
         let chunked = whole_writer_chunks(&normalized);
-        if reference.starts_with("Section") {
-            assert!(matches!(
+        assert!(
+            matches!(
+                projection.references[0][0].status,
+                ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+            ),
+            "a body heading names no document scope"
+        );
+        assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
+    }
+}
+
+#[test]
+fn review132_scope_identity_requires_whole_document_or_annex_identity() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for texts in [
+        vec![
+            "FIRST AMENDMENT TO LEASE AGREEMENT",
+            "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
+            "Section 3 Local\nThe amendment requires written permission.",
+        ],
+        vec![
+            "Section 1 Scope\nEquipment follows Section 7 of the Supply Agreement.",
+            "Section 7 Supply Agreement Terms\nThe local terms require written permission.",
+        ],
+        vec![
+            "Section 1 Scope\nEquipment follows Section 7 of the Master Lease.",
+            "Section 7 Master Lease\nThe sublease requires written permission.",
+        ],
+        vec![
+            "The name of this agreement is “First Amendment to Lease Agreement”.",
+            "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.",
+            "Section 3 Local\nThe amendment requires written permission.",
+        ],
+    ] {
+        let normalized = public_document(&texts.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        assert!(
+            matches!(reference.status, ReferenceStatus::Unresolved(_)),
+            "a mentioned name cannot own the local numbering scope: {:?}",
+            reference.status
+        );
+        let chunked = whole_writer_chunks(&normalized);
+        assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
+    }
+    for title in [
+        "LEASE AGREEMENT",
+        "The name of this agreement is “Lease Agreement”.",
+    ] {
+        let normalized = public_document(&[
+            title.into(),
+            "Section 1 Scope\nEquipment follows Section 3 of the Lease Agreement.".into(),
+            "Section 3 Local\nWritten permission is required.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        assert!(matches!(
+            projection
+                .references
+                .iter()
+                .flatten()
+                .next()
+                .unwrap()
+                .status,
+            ReferenceStatus::Resolved(_)
+        ));
+    }
+}
+
+#[test]
+fn review132_current_document_qualifier_keeps_existing_scope_grammar() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for (kind, supported) in [
+        ("Document", true),
+        ("Agreement", true),
+        ("Contract", true),
+        ("Article", false),
+        ("Exhibit", false),
+        ("Schedule", false),
+    ] {
+        let normalized = public_document(&[
+            format!("Section 1 Scope\nEquipment follows Section 7 of this {kind}."),
+            "Section 7 Local\nWritten permission is required.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        assert_eq!(
+            matches!(
                 projection.references[0][0].status,
                 ReferenceStatus::Resolved(_)
-            ));
-            assert!(projection
-                .context(0, &normalized)
-                .contains("must obtain written permission"));
-            assert!(whole_document::SourceInput::new(&normalized, &chunked).is_ok());
-        } else {
-            assert!(
-                matches!(
-                    projection.references[0][0].status,
-                    ReferenceStatus::Unresolved("ambiguous_document_qualifier")
-                ),
-                "an unsupported preposed name cannot establish a namespace"
-            );
-            assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
-        }
+            ),
+            supported,
+            "current-scope kind {kind}: {:?}",
+            projection.references[0][0].status
+        );
     }
 }
 
@@ -4072,12 +4148,200 @@ fn baseline_repair_saturated_section_never_completes_silently() {
             .split_saturated(&mut progress, 0, &runtime, 7)
             .unwrap_err()
             .code,
-        "WHOLE_DOCUMENT_SECTION_SATURATED"
+        "WHOLE_DOCUMENT_CLAIM_CAPACITY_EXCEEDED"
     );
     assert!(matches!(
         progress.sections[0].state,
         WholeDocumentSectionState::Saturated { .. }
     ));
+}
+
+#[test]
+fn review132_context_saturation_and_document_ceiling_have_distinct_stops() {
+    let normalized =
+        public_document(&["Section 1 Inspection\nThe operator inspects equipment.".into()]);
+    let chunks = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunks).unwrap();
+    let mut runtime = WriterProjectionRuntime::new(usize::MAX);
+    runtime.context_tokens = 8_192;
+    let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut progress = input.new_progress(&plan, &runtime, 7).unwrap();
+    let request = input
+        .dispatch_section(&mut progress, 0, &runtime, 7)
+        .unwrap();
+    let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+    let limit = prompt["maximum_units"].as_u64().unwrap();
+    assert!(limit < MAX_VERIFICATION_BATCHES as u64);
+    let text = json!({"units":(0..limit).map(|n|json!({"text":format!("Inspection proposition {n}."),"source_ids":["s1"]})).collect::<Vec<_>>()}).to_string();
+    input
+        .record_section(
+            &mut progress,
+            0,
+            &ModelResponse {
+                text,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                request_attempts: vec![],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        input
+            .split_saturated(&mut progress, 0, &runtime, 7)
+            .unwrap_err()
+            .code,
+        "WHOLE_DOCUMENT_SECTION_SATURATED"
+    );
+}
+
+#[test]
+fn review132_last_child_at_document_ceiling_reports_capacity_without_delivery() {
+    let normalized = public_document(&[
+        "Section 1 Inspections\nThe operator inspects equipment.".into(),
+        "Section 2 Records\nThe operator keeps records.".into(),
+    ]);
+    let chunks = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunks).unwrap();
+    let runtime = WriterProjectionRuntime::new(usize::MAX);
+    let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut progress = input.new_progress(&plan, &runtime, 7).unwrap();
+    let response = |request: &ModelRequest, count: usize| {
+        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        ModelResponse{text:json!({"units":(0..count).map(|n|json!({"text":format!("Inspection proposition {} number {n}.",request.ordinal),"source_ids":[prompt["sources"][0][0]]})).collect::<Vec<_>>()}).to_string(),runtime_id:runtime.runtime_id().into(),model_id:runtime.model_id().into(),request_attempts:vec![]}
+    };
+    let request = input
+        .dispatch_section(&mut progress, 0, &runtime, 7)
+        .unwrap();
+    input
+        .record_section(&mut progress, 0, &response(&request, 64))
+        .unwrap();
+    input
+        .split_saturated(&mut progress, 0, &runtime, 7)
+        .unwrap();
+    let left = input
+        .dispatch_section(&mut progress, 1, &runtime, 7)
+        .unwrap();
+    input
+        .record_section(&mut progress, 1, &response(&left, 32))
+        .unwrap();
+    let right = input
+        .dispatch_section(&mut progress, 2, &runtime, 7)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&right.user_prompt).unwrap()["maximum_units"],
+        32
+    );
+    for count in [31, 32] {
+        let mut candidate = progress.clone();
+        input
+            .record_section(&mut candidate, 2, &response(&right, count))
+            .unwrap();
+        if count == 31 {
+            assert_eq!(
+                input.finish_progress(&mut candidate).unwrap().claims.len(),
+                63
+            );
+        } else {
+            assert_eq!(
+                input
+                    .split_saturated(&mut candidate, 2, &runtime, 7)
+                    .unwrap_err()
+                    .code,
+                "WHOLE_DOCUMENT_CLAIM_CAPACITY_EXCEEDED"
+            );
+            assert!(input.finish_progress(&mut candidate).is_err());
+        }
+    }
+}
+
+#[test]
+fn review132_persisted_saturation_resumes_split_without_parent_generation() {
+    use crate::pipeline::contracts::{PipelineState, WholeDocumentSectionState};
+    let mut runtime = WholeWriterStageRuntime::new();
+    runtime.admission = WriterProjectionRuntime::new(usize::MAX);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("crash-after-saturation.sqlite");
+    let (mut conn, run, normalized, chunked) = whole_writer_stage_fixture(&path, &runtime);
+    let analyzed = db::get_analyzed_document(&conn, &run).unwrap().unwrap();
+    let seed = generation_seed_for_run(&run);
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    let plan = input.plan(&runtime, seed, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut pending =
+        partial_progress_envelope(input.new_progress(&plan, &runtime, seed).unwrap(), &chunked);
+    pending.claims = direct::source_ordered_claims(&analyzed).unwrap();
+    pending.warnings = analyzed.warnings.clone();
+    let version = db::get_pipeline_run(&conn, &run)
+        .unwrap()
+        .unwrap()
+        .state_version;
+    conn.execute(
+        "UPDATE pipeline_runs SET state=?1 WHERE run_id=?2",
+        rusqlite::params![
+            serde_json::to_string(&PipelineState::Synthesizing).unwrap(),
+            run
+        ],
+    )
+    .unwrap();
+    db::save_whole_synthesis_progress(&mut conn, &run, version, None, &pending).unwrap();
+    let mut dispatched = pending.clone();
+    let request = input
+        .dispatch_section(
+            dispatched.whole_document_progress.as_mut().unwrap(),
+            0,
+            &runtime,
+            seed,
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(&mut conn, &run, version, Some(&pending), &dispatched)
+        .unwrap();
+    let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+    let text=json!({"units":(0..prompt["maximum_units"].as_u64().unwrap()).map(|n|json!({"text":format!("Persisted proposition {n}."),"source_ids":[prompt["sources"][0][0]]})).collect::<Vec<_>>()}).to_string();
+    let mut saturated = dispatched.clone();
+    input
+        .record_section(
+            saturated.whole_document_progress.as_mut().unwrap(),
+            0,
+            &ModelResponse {
+                text,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                request_attempts: vec![],
+            },
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(&mut conn, &run, version, Some(&dispatched), &saturated)
+        .unwrap();
+    drop(conn);
+    let mut reopened = db::init_db(&path).unwrap();
+    let result = synthesize_analyzed_document_for_policy(
+        &mut reopened,
+        &runtime,
+        &run,
+        &UNCONTROLLED_EXECUTION,
+        None,
+        WHOLE_DOCUMENT_VERSION,
+    );
+    assert!(
+        result.is_ok(),
+        "a persisted saturated response owns no outstanding inference: {result:?}"
+    );
+    let draft = result.unwrap();
+    assert_eq!(draft.summary_claims.len(), 4);
+    assert!(matches!(
+        draft.whole_document_progress.as_ref().unwrap().sections[0].state,
+        WholeDocumentSectionState::Split { .. }
+    ));
+    assert_eq!(
+        runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    input.validate_saved_synthesis(&draft).unwrap();
 }
 
 #[test]

@@ -156,6 +156,13 @@ fn initialism(word: &str) -> bool {
 
 // Qualified names are read structurally. No document/law name or abbreviation
 // vocabulary supplies an identity. A bare capitalized name is never scanned.
+fn explicit_document_word(word: &str) -> bool {
+    matches!(
+        word.trim_end_matches('.').to_ascii_lowercase().as_str(),
+        "document" | "agreement" | "contract"
+    )
+}
+
 fn qualifier_name_part(word: &str) -> bool {
     word.chars().next().is_some_and(char::is_uppercase)
         || word.chars().all(|c| c.is_ascii_digit())
@@ -205,15 +212,7 @@ fn preposed_qualifier(
         .count()
         >= 2
         && words.iter().any(|t| t.text.chars().any(char::is_uppercase));
-    let recognized = numeric_namespace
-        || matches!(
-            ts[end]
-                .text
-                .trim_end_matches('.')
-                .to_ascii_lowercase()
-                .as_str(),
-            "document" | "agreement" | "contract"
-        );
+    let recognized = numeric_namespace || explicit_document_word(ts[end].text);
     named.then(|| {
         (
             start,
@@ -249,12 +248,9 @@ fn qualifier(
         .is_some_and(|t| t.text.eq_ignore_ascii_case("this"))
     {
         cursor += 1;
-        let current = ts.get(cursor).is_some_and(|t| {
-            t.text
-                .trim_end_matches('.')
-                .chars()
-                .all(char::is_alphabetic)
-        });
+        let current = ts
+            .get(cursor)
+            .is_some_and(|t| explicit_document_word(t.text));
         return ((cursor + 1).min(ts.len()), None, !current);
     }
     if ts
@@ -288,7 +284,8 @@ fn qualifier(
         }
         let word = t.text.trim_end_matches('.').to_ascii_lowercase();
         let document = word == "document";
-        let named = matches!(word.as_str(), "agreement" | "contract")
+        let named = !document
+            && explicit_document_word(&word)
             && cursor > begin
             && ts[begin..cursor]
                 .iter()
@@ -676,36 +673,44 @@ fn owned_namespace_origin(
     if identity.is_empty() {
         return Some(Err("ambiguous_document_qualifier"));
     }
-    let document_identity = identities.iter().any(|entry| match entry {
-        SourceIdentity::Heading(text) | SourceIdentity::Declared(text) => identity_words(text)
+    let mentions = |text: &str| {
+        identity_words(text)
             .windows(identity.len())
-            .any(|words| words == identity),
-        SourceIdentity::Introduction(text) => {
-            let words = identity_words(text);
-            words.first().is_some_and(|w| w == "this") && words[1..].starts_with(&identity)
+            .any(|words| words == identity)
+    };
+    let exact = |text: &str| identity_words(text) == identity;
+    let mut scopes = HashSet::new();
+    let mut ambiguous = false;
+    for entry in identities {
+        match entry {
+            SourceIdentity::DocumentTitle(text) | SourceIdentity::Declared(text) => {
+                if exact(text) {
+                    scopes.insert(None);
+                } else {
+                    ambiguous |= mentions(text);
+                }
+            }
+            SourceIdentity::Heading(text) => ambiguous |= mentions(text),
+            SourceIdentity::Introduction(text) => {
+                let words = identity_words(text);
+                ambiguous |=
+                    words.first().is_some_and(|w| w == "this") && words[1..].starts_with(&identity);
+            }
         }
-    });
-    let mut scopes = clauses
-        .iter()
-        .enumerate()
-        .filter_map(|(index, clause)| {
-            let named = clause.headings.iter().any(|heading| {
-                identity_words(heading)
-                    .windows(identity.len())
-                    .any(|words| words == identity)
-            }) || clause.annex.as_ref().is_some_and(|(kind, label)| {
-                identity_words(&format!("{kind} {label}")) == identity
-            });
-            named.then(|| annex_scope(clauses, index))
-        })
-        .collect::<HashSet<_>>();
-    // A retained document self-name/title with no clause heading owns the main
-    // document namespace. A named annex keeps its own numbering namespace.
+    }
+    for (index, clause) in clauses.iter().enumerate() {
+        let annex_identity = clause.annex.as_ref().is_some_and(|(kind, label)| {
+            exact(&format!("{kind} {label}"))
+                || clause.headings.iter().any(|heading| exact(heading))
+        });
+        if annex_identity {
+            scopes.insert(Some(index));
+        } else {
+            ambiguous |= clause.headings.iter().any(|heading| mentions(heading));
+        }
+    }
     if scopes.is_empty() {
-        if !document_identity {
-            return None;
-        }
-        scopes.insert(None);
+        return ambiguous.then_some(Err("ambiguous_document_qualifier"));
     }
     if scopes.len() != 1 {
         return Some(Err("ambiguous_document_qualifier"));

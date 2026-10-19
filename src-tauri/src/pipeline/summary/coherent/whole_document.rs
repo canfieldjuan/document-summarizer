@@ -737,25 +737,11 @@ impl<'a> SourceInput<'a> {
         Ok(plan)
     }
 
-    pub(super) fn dispatch_section(
+    fn remaining_claim_allowance(
         &self,
-        progress: &mut WholeDocumentProgress,
-        index: usize,
-        runtime: &dyn ModelRuntime,
+        progress: &WholeDocumentProgress,
         seed: u64,
-    ) -> Result<ModelRequest, PipelineFailure> {
-        self.validate_runtime_binding(progress, runtime, seed)?;
-        if progress.assembly_lineage.is_some()
-            || progress.sections.iter().take(index).any(|s| {
-                !matches!(
-                    s.state,
-                    WholeDocumentSectionState::Completed { .. }
-                        | WholeDocumentSectionState::Split { .. }
-                )
-            })
-        {
-            return Err(invalid_source());
-        }
+    ) -> Result<usize, PipelineFailure> {
         let mut signatures = HashSet::new();
         for (ordinal, section) in progress.sections.iter().enumerate() {
             if let WholeDocumentSectionState::Completed { response } = &section.state {
@@ -775,7 +761,29 @@ impl<'a> SourceInput<'a> {
                 }
             }
         }
-        let remaining = MAX_VERIFICATION_BATCHES.saturating_sub(signatures.len());
+        Ok(MAX_VERIFICATION_BATCHES.saturating_sub(signatures.len()))
+    }
+
+    pub(super) fn dispatch_section(
+        &self,
+        progress: &mut WholeDocumentProgress,
+        index: usize,
+        runtime: &dyn ModelRuntime,
+        seed: u64,
+    ) -> Result<ModelRequest, PipelineFailure> {
+        self.validate_runtime_binding(progress, runtime, seed)?;
+        if progress.assembly_lineage.is_some()
+            || progress.sections.iter().take(index).any(|s| {
+                !matches!(
+                    s.state,
+                    WholeDocumentSectionState::Completed { .. }
+                        | WholeDocumentSectionState::Split { .. }
+                )
+            })
+        {
+            return Err(invalid_source());
+        }
+        let remaining = self.remaining_claim_allowance(progress, seed)?;
         if remaining == 0 {
             return Err(stage_failure(
                 PipelineStage::Synthesize,
@@ -891,6 +899,12 @@ impl<'a> SourceInput<'a> {
             return Err(invalid_source());
         };
         if parent.primary.len() < 2 {
+            if section_claim_limit(&parent.request)?
+                == self.remaining_claim_allowance(progress, seed)?
+            {
+                return Err(stage_failure(PipelineStage::Synthesize, "WHOLE_DOCUMENT_CLAIM_CAPACITY_EXCEEDED",
+                    "The indivisible source filled the remaining document claim allowance; complete coverage is unproven", false));
+            }
             return Err(stage_failure(PipelineStage::Synthesize,"WHOLE_DOCUMENT_SECTION_SATURATED",
                 format!("Indivisible source filled {} claim slots at {} characters; admitted output allowance {} tokens; complete coverage is unproven",
                     section_claim_limit(&parent.request)?,MAX_UNIT_CHARACTERS,parent.request.max_output_tokens),false));
@@ -1306,9 +1320,7 @@ pub(in crate::pipeline::summary) fn run_sections(
     if progress.sections.iter().any(|s| {
         matches!(
             s.state,
-            WholeDocumentSectionState::Dispatched
-                | WholeDocumentSectionState::Failed { .. }
-                | WholeDocumentSectionState::Saturated { .. }
+            WholeDocumentSectionState::Dispatched | WholeDocumentSectionState::Failed { .. }
         )
     }) {
         // Another worker may still own a dispatched request. Do not fail its run
@@ -1329,11 +1341,12 @@ pub(in crate::pipeline::summary) fn run_sections(
                 ))
             })?;
     }
-    if progress
-        .sections
-        .iter()
-        .any(|s| matches!(s.state, WholeDocumentSectionState::Pending))
-    {
+    if progress.sections.iter().any(|s| {
+        matches!(
+            s.state,
+            WholeDocumentSectionState::Pending | WholeDocumentSectionState::Saturated { .. }
+        )
+    }) {
         runtime.health().map_err(|failure| {
             stage(runtime_pipeline_failure(
                 PipelineStage::Synthesize,
@@ -1355,6 +1368,34 @@ pub(in crate::pipeline::summary) fn run_sections(
         if matches!(
             draft.whole_document_progress.as_ref().unwrap().sections[index].state,
             WholeDocumentSectionState::Completed { .. } | WholeDocumentSectionState::Split { .. }
+        ) {
+            index += 1;
+            continue;
+        }
+        if matches!(
+            draft.whole_document_progress.as_ref().unwrap().sections[index].state,
+            WholeDocumentSectionState::Saturated { .. }
+        ) {
+            let saturated = draft.clone();
+            input
+                .split_saturated(
+                    draft.whole_document_progress.as_mut().unwrap(),
+                    index,
+                    runtime,
+                    seed,
+                )
+                .map_err(stage)?;
+            db::save_whole_synthesis_progress(
+                conn,
+                &run.run_id,
+                run.state_version,
+                Some(&saturated),
+                &draft,
+            )?;
+        }
+        if matches!(
+            draft.whole_document_progress.as_ref().unwrap().sections[index].state,
+            WholeDocumentSectionState::Split { .. }
         ) {
             index += 1;
             continue;
@@ -1413,28 +1454,12 @@ pub(in crate::pipeline::summary) fn run_sections(
             Some(&dispatched),
             &draft,
         )?;
-        if matches!(
+        if !matches!(
             draft.whole_document_progress.as_ref().unwrap().sections[index].state,
             WholeDocumentSectionState::Saturated { .. }
         ) {
-            let saturated = draft.clone();
-            input
-                .split_saturated(
-                    draft.whole_document_progress.as_mut().unwrap(),
-                    index,
-                    runtime,
-                    seed,
-                )
-                .map_err(stage)?;
-            db::save_whole_synthesis_progress(
-                conn,
-                &run.run_id,
-                run.state_version,
-                Some(&saturated),
-                &draft,
-            )?;
+            index += 1;
         }
-        index += 1;
     }
     cancellation_checkpoint(control, PipelineStage::Synthesize).map_err(stage)?;
     input.finalize_progress(&mut draft).map_err(stage)?;

@@ -496,6 +496,7 @@ struct ReadLine<'a> {
     opening_cover: bool,
     ends_unit: bool,
     starts_unit: bool,
+    opening_identity: bool,
     kind: LineKind,
     toc: bool,
     toc_entry: bool,
@@ -614,6 +615,7 @@ impl<'a> ReadLine<'a> {
             opening_cover,
             ends_unit,
             starts_unit: false,
+            opening_identity: false,
             kind,
             toc,
             toc_entry,
@@ -668,6 +670,7 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
 }
 
 enum SourceIdentity {
+    DocumentTitle(String),
     Heading(String),
     Introduction(String),
     Declared(String),
@@ -757,6 +760,12 @@ fn contract_source_inventory(
     let mut in_opening = true;
     let mut in_annex = false;
     for index in 0..read.len() {
+        read[index].opening_identity = in_opening
+            && !read[index].numbered
+            && read[index].article.is_none()
+            && read[index].annex.is_none()
+            && !read[index].toc
+            && !read[index].toc_entry;
         in_annex |= read[index].annex.is_some();
         if grammar == HeadingGrammar::WholeDocument
             && in_annex
@@ -838,10 +847,18 @@ fn contract_source_inventory(
         .filter_map(|(fragment, read)| {
             let text = line_text(fragment);
             if let Some(name) = declared_source_name(text) {
-                return Some(SourceIdentity::Declared(name.to_owned()));
+                return Some(if read.opening_identity {
+                    SourceIdentity::Declared(name.to_owned())
+                } else {
+                    SourceIdentity::Heading(name.to_owned())
+                });
             }
             if read.title || read.kind == LineKind::HeadingLike && read.starts_unit {
-                Some(SourceIdentity::Heading(text.to_owned()))
+                Some(if read.opening_identity {
+                    SourceIdentity::DocumentTitle(text.to_owned())
+                } else {
+                    SourceIdentity::Heading(text.to_owned())
+                })
             } else if text.to_ascii_lowercase().starts_with("this ") {
                 Some(SourceIdentity::Introduction(text.to_owned()))
             } else {
