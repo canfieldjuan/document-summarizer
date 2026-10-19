@@ -1073,7 +1073,7 @@ not proof of absence; they no longer bypass the ownership decision.
 The same line reader retains headings, introductions and supported explicit
 self-name declarations as distinct identity signals. Mentioning another document
 in ordinary prose does not create a self-name. Known-name and opaque-name
-references to an owned heading/self-name stay unresolved rather than becoming a
-false external. These source-only controls precede remeasurement of both inputs;
+references to an owned heading/self-name resolve in that owned numbering scope
+when clean, and otherwise stay unresolved rather than becoming a false external. These source-only controls precede remeasurement of both inputs;
 no test labels or source bytes change. The final private report must explain
 every reference-record delta, not merely report zero blocking counts.

@@ -447,7 +447,10 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
         }
         // An unqualified hyphen form can only be a local range when its
         // endpoints are owned. Resolve that identity before diagnosing a suffix.
-        if invalid && targets.iter().any(|t| matches!(t, Target::Range(..))) {
+        if invalid
+            && (targets.iter().any(|t| matches!(t, Target::Range(..)))
+                || matches!(namespace, Some(QualifiedNamespace::ExplicitDocument(_))))
+        {
             targets = targets
                 .into_iter()
                 .map(|t| Target::UnsupportedSuffix(Box::new(t)))
@@ -689,6 +692,40 @@ fn namespace_is_owned(name: &str, clauses: &[SourceClause], identities: &[Source
     })
 }
 
+fn owned_namespace_origin(name: &str, clauses: &[SourceClause]) -> Result<usize, &'static str> {
+    let identity = identity_words(name);
+    let mut scopes = clauses
+        .iter()
+        .enumerate()
+        .filter_map(|(index, clause)| {
+            let named = clause.headings.iter().any(|heading| {
+                identity_words(heading)
+                    .windows(identity.len())
+                    .any(|words| words == identity)
+            }) || clause.annex.as_ref().is_some_and(|(kind, label)| {
+                identity_words(&format!("{kind} {label}")) == identity
+            });
+            named.then(|| annex_scope(clauses, index))
+        })
+        .collect::<HashSet<_>>();
+    // A retained document self-name/title with no clause heading owns the main
+    // document namespace. A named annex keeps its own numbering namespace.
+    if scopes.is_empty() {
+        scopes.insert(None);
+    }
+    if scopes.len() != 1 {
+        return Err("ambiguous_document_qualifier");
+    }
+    match scopes.into_iter().next().unwrap() {
+        Some(index) => Ok(index),
+        None => clauses
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| annex_scope(clauses, index).is_none().then_some(index))
+            .ok_or("missing_target"),
+    }
+}
+
 fn numbered_target_is_owned(target: &Target, clauses: &[SourceClause]) -> bool {
     match target {
         Target::Section(number) => clauses.iter().any(|c| c.number.as_ref() == Some(number)),
@@ -760,6 +797,27 @@ impl DependencyProjection {
                     ) {
                         if let Some(namespace) = &reference.namespace {
                             let name = namespace.name();
+                            if namespace_is_owned(name, &clauses, &identities) {
+                                if targets.is_empty() {
+                                    reference.status =
+                                        ReferenceStatus::Unresolved("unsupported_form");
+                                    owned.push(reference);
+                                    continue;
+                                }
+                                let owner = owned_namespace_origin(name, &clauses);
+                                for target in targets {
+                                    let mut item = reference.clone();
+                                    item.status = match owner
+                                        .and_then(|index| resolve(&clauses, &target, index))
+                                    {
+                                        Ok(status @ ReferenceStatus::Resolved(_)) => status,
+                                        Ok(_) => ReferenceStatus::Unresolved("missing_target"),
+                                        Err(reason) => ReferenceStatus::Unresolved(reason),
+                                    };
+                                    owned.push(item);
+                                }
+                                continue;
+                            }
                             let admissible = match namespace {
                                 QualifiedNamespace::ExplicitDocument(_) => true,
                                 QualifiedNamespace::OpaqueName(_) => {
@@ -769,7 +827,7 @@ impl DependencyProjection {
                                         })
                                 }
                             };
-                            if admissible && !namespace_is_owned(name, &clauses, &identities) {
+                            if admissible {
                                 reference.status = ReferenceStatus::External(ExternalSource {
                                     document: name.to_owned(),
                                     reason: match namespace {

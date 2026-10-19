@@ -33,7 +33,7 @@ OFFLINE_TESTS = [
     ('assembly', 'pipeline::summary::coherent::readiness::whole_writer_assembly_replays_the_frozen_public_candidate_packet', True),
     ('consolidation-boundary', 'pipeline::summary::coherent::readiness::whole_writer_original_consolidation_request_still_exceeds_native_context', True),
     ('c9', 'pipeline::summary::comparisons::tests::parity::archived_c9_verdicts_survive_relation_guard', False),
-    ('same60', 'pipeline::summary::coherent::readiness::archived_delivery_uses_production_getters_and_validation', True),
+    ('same60', 'pipeline::summary::relation_guard_precision_inventory::archived_delivery_uses_production_getters_and_validation', True),
 ]
 TEST = 'pipeline::summary::comparisons::tests::parity::original_c9_production_gateway_parity'
 NATIVE_TEST = 'pipeline::llama_cpp::framing_tests::original_c9_native_framing_parity'

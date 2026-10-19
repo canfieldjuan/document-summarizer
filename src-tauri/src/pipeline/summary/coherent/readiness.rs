@@ -3780,16 +3780,104 @@ fn review132_capitalized_titles_do_not_prove_external_document_identity() {
             "Section 7 Payment Terms\nThe operator must obtain written permission.".into(),
         ]);
         let projection = DependencyProjection::new(&normalized);
-        assert!(
-            matches!(
+        let chunked = whole_writer_chunks(&normalized);
+        if reference.starts_with("Section") {
+            assert!(matches!(
                 projection.references[0][0].status,
-                ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+                ReferenceStatus::Resolved(_)
+            ));
+            assert!(projection
+                .context(0, &normalized)
+                .contains("must obtain written permission"));
+            assert!(whole_document::SourceInput::new(&normalized, &chunked).is_ok());
+        } else {
+            assert!(
+                matches!(
+                    projection.references[0][0].status,
+                    ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+                ),
+                "an unsupported preposed name cannot establish a namespace"
+            );
+            assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
+        }
+    }
+}
+
+#[test]
+fn baseline_repair_owned_namespace_malformed_targets_remain_blocking() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for target in ["b", "7(b)", "7 and b"] {
+        let normalized = public_document(&[
+            "The name of this agreement is “Lunar Port Agreement”.".into(),
+            format!(
+                "Section 1 Scope\nEquipment follows Section {target} of the Lunar Port Agreement."
             ),
-            "capitalization does not establish an absent document namespace"
+            "Section 7 Inspection\nWritten permission is required.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        let references = projection.references.iter().flatten().collect::<Vec<_>>();
+        assert!(
+            !references.is_empty(),
+            "malformed owned reference must not disappear: {target}"
         );
+        assert!(references.iter().any(|r| matches!(r.status, ReferenceStatus::Unresolved(_))),
+            "malformed owned reference must not become a whole-section approval: {target}: {references:?}");
         let chunked = whole_writer_chunks(&normalized);
         assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
     }
+}
+
+#[test]
+fn baseline_repair_owned_namespace_resolves_before_external_classification() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for name in ["Lunar Port Standard", "Lunar Port Agreement"] {
+        let normalized = public_document(&[
+            format!("The name of this agreement is “{name}”."),
+            format!("Section 1 Scope\nEquipment follows Section 7 of the {name}."),
+            "Section 7 Inspection\nWritten permission is required.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        let reference = projection.references.iter().flatten().next().unwrap();
+        assert!(
+            matches!(&reference.status, ReferenceStatus::Resolved(targets) if !targets.is_empty()),
+            "owned name with a clean target must resolve internally: {:?}",
+            reference.status
+        );
+        assert!(projection
+            .closures
+            .iter()
+            .enumerate()
+            .all(|(i, _)| projection.blocking_reasons(i).is_empty()));
+    }
+    let normalized = public_document(&[
+        "Section 1 Scope\nEquipment follows Section 7 of the Separate Supply Agreement.".into(),
+        "Section 7 Inspection\nWritten permission is required.".into(),
+    ]);
+    let projection = DependencyProjection::new(&normalized);
+    assert!(matches!(projection.references[0][0].status, ReferenceStatus::External(_)),
+        "the existing explicit-document grammar owns a different namespace even with the same local number");
+
+    let normalized = public_document(&[
+        "Section 1 Scope\nEquipment follows Section 7 of the Lunar Port Standard.".into(),
+        "Section 7 Local\nLocal unrelated text applies.".into(),
+        "Schedule A Lunar Port Standard\nSection 7 Inspection\nWritten permission is required."
+            .into(),
+    ]);
+    let projection = DependencyProjection::new(&normalized);
+    let ReferenceStatus::Resolved(targets) = &projection.references[0][0].status else {
+        panic!(
+            "owned annex must resolve in its own numbering namespace: {:?}",
+            projection.references[0][0].status
+        );
+    };
+    assert!(targets.iter().any(|index| projection.clauses[*index]
+        .headings
+        .iter()
+        .any(|h| h.contains("Inspection"))));
+    assert!(!targets.iter().any(|index| projection.clauses[*index]
+        .headings
+        .iter()
+        .any(|h| h.contains("Local"))));
 }
 
 #[test]
