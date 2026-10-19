@@ -141,13 +141,48 @@ permissions. Publish one grouped repair push after verification; identify the
 last reviewed base and new head for delta review. No merge before independent
 exact-head review, required CI and clearance of the existing holds.
 
-## Implementation, cold audit and gap audit
+## Implementation and cold diff audit
 
-No implementation or tests have been changed. The contract is the only proposed
-diff. No tests are rerun for this documentation-only commit. Preserve the earlier
-baseline receipt with its exercised source, without claiming it tested a repair.
+Tested source `87f4992b60daf4a2ccbffaf4466af2bee8af2cc0` repairs my `0e8ce54b` at
+`whole_document.rs::run_sections`. At line 1333 only Pending historical requests
+receive preflight. Saturated parents remain immutable; existing child admission
+and health checks stay in place. At line 1469 pure finalization and at line 1470
+saved-artifact validation remain; the duplicate future-Verify call is removed.
+The actual Verify gate and non-whole-document helper are byte-unchanged.
 
-**NOT DONE:** fail-first reproduction, source fix,
-regression/mutation proof, frozen comparison, publication, native CI and
-independent review remain. All PR116, qualification, live, production, ready and
-merge holds remain. Live model budget for this proposal: zero.
+`readiness.rs:4600` adds public saved-progress fixtures, an all-stage backend
+tripwire and six regressions at lines 4899-5051. It reuses the existing stage,
+progress, response, assembly and DB owners. No existing test is weakened or
+rewritten. No model, prompt, schema, sampler, framing, limit, storage, retry,
+source-identity, workflow, dependency or script change.
+
+## Proof and remaining gates
+
+Both fail-first probes fail with PUBLIC_BACKEND_OFFLINE before the repair: one
+at historical Synthesize admission, one at future Verify admission. The run is
+Failed and the saved bytes are preserved. After repair, DB-reopened Completed
+and Split-with-completed-children progress assembles and persists as Synthesized
+with zero backend calls. No Verified or delivered artifact is created.
+Pending/Mixed/Saturated admission, Pending health, both real Verify admission
+kinds, and fresh-run stage ownership are tested. Verify failure preserves the
+completed synthesized artifact and stops before generation or delivery.
+
+82 readiness tests pass, 5 explicit adapters ignored. All seven causal mutants
+are killed at their intended behavioral assertions, with source restored.
+Strict Clippy, formatting and Windows GNU library/test cross-compilation pass.
+Native Windows execution and broad duplicated suites remain required CI work.
+
+All seven unchanged frozen owners pass with zero live model calls. Complete
+dependency, capacity, assembly and SAME60 JSON files are byte-identical to the
+published writer source. Complete reference classification delta: zero.
+This is offline regression evidence, not combined-stack/live qualification.
+
+Durable public alias completed-section-resume-repair-20261018/repair-proof.json,
+SHA256 `de01377c11f3ca13f584075f4bc555552ab46c0834cbe2a609b940afa328fe49`.
+Private offline receipt SHA256
+`73ec78181ddb2f8d7835a9f365575faffdde79d6e873d1e3c1ccab22471242ca`.
+This prose-only proof update reuses the tested source; code tests are not rerun.
+
+**NOT DONE:** publication, required native CI and independent exact-head review
+remain. All PR116, qualification, live, production, ready and merge holds remain.
+No new model-run budget or production adoption is authorised.
