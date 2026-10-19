@@ -560,6 +560,44 @@ mod qualification_budget_tests {
     }
 
     #[test]
+    fn writer_rejects_non_writer_preflight_even_with_a_listed_probe_hash() {
+        for stage in [PipelineStage::Analyze, PipelineStage::Verify] {
+            let probe = Probe::new();
+            let synthesis = request(PipelineStage::Synthesize, 0);
+            let foreign = request(stage, 1);
+            // The hash check deliberately permits this request. Stage ownership
+            // must reject it independently, before reservation or delegation.
+            let budget = QualificationBudget::whole_writer(
+                1,
+                1,
+                std::slice::from_ref(&synthesis),
+                &probe_hashes(std::slice::from_ref(&foreign)),
+            )
+            .unwrap();
+            let runtime = budget.wrap(probe.clone());
+            let result = runtime.preflight_request(&foreign);
+            let observation = budget.observation();
+            assert_eq!(
+                (
+                    probe.admissions.load(Ordering::SeqCst),
+                    probe.calls.load(Ordering::SeqCst),
+                    observation["delegated_preflights"].as_u64().unwrap(),
+                    observation["reserved_completions"].as_u64().unwrap(),
+                ),
+                (0, 0, 0, 0),
+                "non-writer preflight must not delegate or spend",
+            );
+            assert_eq!(result.unwrap_err().code, "QUALIFICATION_UNEXPECTED_STAGE");
+            assert_eq!(
+                runtime.generate(&synthesis).unwrap_err().code,
+                "QUALIFICATION_STOPPED",
+            );
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(budget.observation()["reserved_completions"], 0);
+        }
+    }
+
+    #[test]
     fn writer_duplicate_and_concurrent_reservations_are_not_refunded() {
         let requests: Vec<_> = (0..8)
             .map(|i| request(PipelineStage::Synthesize, i))
