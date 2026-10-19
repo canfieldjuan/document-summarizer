@@ -409,6 +409,92 @@ class OutputPermissionsTests(unittest.TestCase):
                 owner.assert_called_once_with(root / 'run')
 
 
+class WriterPreparationTests(unittest.TestCase):
+    def fixture(self, root):
+        import json
+        def write(name, value):
+            path=root/name;path.write_text(json.dumps(value));return path
+        source=write('sources.json', {'inputs':[{'alias':'public-doc','sha256':'source-hash'}]})
+        frozen={'source_packet':{'path':str(source),'sha256':parity.sha(source)},
+                'count_inventory':{'path':str(root/'counter.json'),'sha256':'count-hash'}}
+        freeze=write('freeze.json', frozen)
+        prep=write('cases.json', {'version':1,'cases':[{'alias':'public-doc','run_id':'public-run'}]})
+        args=SimpleNamespace(offline_baseline_receipt=root/'prior.json',writer_freeze=freeze,
+                             preparation=prep,output=root/'output')
+        return args, frozen, source
+
+    def test_packet_boundaries_and_profile_tamper(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);args,_,source=self.fixture(root);good=parity.read(args.preparation)
+            parity.writer_preparation_packet(args.preparation,source)
+            variants=[]
+            for version in [0,False,'1',2]:
+                bad=copy.deepcopy(good);bad['version']=version;variants.append(bad)
+            for run in ['',False,0,None]:
+                bad=copy.deepcopy(good);bad['cases'][0]['run_id']=run;variants.append(bad)
+            for cases in [[], good['cases']*2, [{'alias':'foreign','run_id':'a'}], [{'alias':'public-doc','run_id':'a','seed':7}]]:
+                bad=copy.deepcopy(good);bad['cases']=cases;variants.append(bad)
+            profile=root/'profile.json';profile.write_text('{}')
+            bad=copy.deepcopy(good);bad['cases'][0]['profile']={'path':str(profile),'sha256':'changed'};variants.append(bad)
+            for bad in variants:
+                args.preparation.write_text(json.dumps(bad))
+                with self.subTest(value=bad), self.assertRaises(ValueError):
+                    parity.writer_preparation_packet(args.preparation,source)
+
+    def test_stale_proof_stops_before_output_or_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);args,_,_=self.fixture(root)
+            with (mock.patch.object(parity,'require_offline_baseline',side_effect=ValueError('stale')),
+                    mock.patch.object(parity,'subprocess') as process):
+                with self.assertRaisesRegex(ValueError,'stale'):
+                    parity.run_writer_preparation(args)
+                process.run.assert_not_called()
+            self.assertFalse(args.output.exists())
+
+    def test_real_launcher_uses_only_offline_selector_and_preserves_evidence(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);root.chmod(0o700);args,frozen,_=self.fixture(root)
+            args.offline_baseline_receipt.write_text('{}')
+            request={'stage':'Synthesize','ordinal':0,'seed':7,'system_prompt':'public',
+                     'user_prompt':'public','max_output_tokens':2048,'output_format':'Text'}
+            encoded=json.dumps(request)
+            report={'generation_calls':0,'runtime_startups':0,'native_qualified':False,
+                    'cases':[{'alias':'public-doc','source_sha256':'source-hash','run_id':'public-run','seed':7,
+                              'source_units':2,'initial_sections':1,'writer_completion_planning_ceiling':3,
+                              'wire_bodies_approved':False,'stage_entry':{'status':'blocked'},
+                              'observed_probe_request_hashes':[parity.digest_text(encoded)],'offline_preflights':1,
+                              'requests':[{'request':request,'request_json':encoded,'request_sha256':parity.digest_text(encoded)}]}]}
+            def run(command, **kwargs):
+                self.assertIn('pipeline::summary::tests::whole_writer_prepare_frozen_requests',command)
+                self.assertIn('--ignored',command)
+                self.assertNotIn('DOC_SUM_QUALIFICATION_GGUF',kwargs['env'])
+                Path(kwargs['env']['DOC_SUM_WRITER_PREPARATION_OUTPUT']).write_text(json.dumps(report))
+                kwargs['stdout'].write('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;\n')
+                return SimpleNamespace(returncode=0)
+            baseline={'frozen_inputs':frozen,'baseline':{}}
+            with mock.patch.object(parity,'require_offline_baseline',return_value=baseline), \
+                    mock.patch.object(parity,'offline_source',return_value={'files':{}}), \
+                    mock.patch.object(parity,'verify_frozen_inputs'), \
+                    mock.patch.object(parity,'EVIDENCE_ROOTS',(root,)), \
+                    mock.patch.object(parity,'http',side_effect=AssertionError('network forbidden')), \
+                    mock.patch.object(parity.subprocess,'run',side_effect=run) as process:
+                self.assertEqual(parity.run_writer_preparation(args),0)
+                receipt=parity.read(args.output/'receipt.json')
+                self.assertEqual(receipt['actual_calls'],0);self.assertFalse(receipt['native_qualified'])
+                before=(args.output/'freeze.json').read_bytes()
+                with self.assertRaisesRegex(ValueError,'no retry'):
+                    parity.run_writer_preparation(args)
+                self.assertEqual((args.output/'freeze.json').read_bytes(),before)
+                self.assertEqual(process.call_count,1)
+                args.output=root/'tampered'
+                report['cases'][0]['requests'][0]['request_sha256']='changed'
+                with self.assertRaisesRegex(ValueError,'request bytes/seed'):
+                    parity.run_writer_preparation(args)
+                self.assertFalse((args.output/'receipt.json').exists())
+
+
 class ReceiptTests(unittest.TestCase):
     def receipt(self, phase='gateway'):
         artifacts = {'freeze.json': 'hash', 'exit.json': 'hash', 'run.log': 'hash'}

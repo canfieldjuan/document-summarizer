@@ -1,0 +1,170 @@
+{
+  "status": "OFFLINE_IMPLEMENTED_EXACT_HEAD_REVIEW_PENDING",
+  "title": "Prepare the existing whole-document writer qualification adapter without live dispatch",
+  "inventory": {
+    "alias": "whole-writer-qualification-preparation-20261019/inventory.json",
+    "sha256": "1af91f8d6fcca734fbeedd997ec2278e72a98550a77951114704a68e7a4b2ae8"
+  },
+  "root_cause": "The existing qualification adapter encodes the earlier one-Synthesize protocol. synthesis_only permits one completion and 64 delegated preflights; generate_with_control separately hardcodes one Synthesize. The whole writer has multiple initial sections, budget-search probes and optional Saturated children. Reusing the old adapter unchanged would stop before it exercises the new writer. This is a test-adapter protocol mismatch, not evidence of a model limit or an app defect.",
+  "required_change_surface": [
+    {
+      "path": "src-tauri/tests/support/live_runtime.rs",
+      "change": "Extend the existing shared budget owner with an explicit whole-writer qualification mode; preserve old modes and defaults. Require validated finite per-stage/completion/preflight limits. Reserve before delegation under the existing shared stop state; no refund or reset."
+    },
+    {
+      "path": "src-tauri/src/pipeline/summary.rs (existing test module)",
+      "change": "Add a test-only preparation/recorder entry through the existing production whole-document policy and source/planning/progress/assembly owners. Reuse the configured product runtime factory and supervisor pattern; do not implement an alternative writer, schema, framing or parser. Preparation uses the accepted offline counter and never constructs a live runtime."
+    },
+    {
+      "path": "scripts/c9-preproduction-parity.py",
+      "change": "Add an explicitly non-dispatching writer preparation mode that binds the combined source, frozen inputs, runtime configuration and exact planned requests. Require the existing seven-owner offline receipt. The later live mode and dispatch authorization are separate scope."
+    }
+  ],
+  "explicit_non_scope": [
+    "No production source behavior, prompt, schema, model, framing, seed policy, settings or capacity changes.",
+    "No model server, GPU work, tokenization HTTP calls or generation.",
+    "No Analyze or Verify generation; no whole-pipeline, supported-output or fidelity claim from preparation.",
+    "No use of benchmark fact contents or DV labels to tune generation.",
+    "No new public PR push, ready transition, merging into any published frozen branch, hold clearance or production adoption."
+  ],
+  "assumptions_blockers": [
+    "Both frozen documents must use their existing source identities. The preparation must enumerate which valid persisted Analyze artifacts satisfy the unchanged stage entry; if unavailable or stale, report that prerequisite and do not synthesize invented analysis or silently run Analyze.",
+    "Whole-writer admission and Saturated splitting can change later request bodies and allowances. Initial offline requests with test seed 7 are capacity evidence, not automatically the production run-seed requests.",
+    "Before any live scope, freeze the deterministic run IDs, native profile/model/server/libraries/tokenizer, exact request serialization, finite completion and preflight limits, and every approval consumed by the before-send gate.",
+    "Every initial or response-dependent request must be approved under the later accepted body-gate policy before dispatch; unknown children are not pre-approved by these initial counts.",
+    "Stack placement and delta-review plan must preserve independent PR141/143 review and PR132 freeze; local combined tree is not reviewed integration."
+  ],
+  "verification_plan": [
+    "Fail-first public probes at the existing shared budget owner: explicitly admitted multiple writer completions and measured-scale preflights must not inherit the historical one/64 limits.",
+    "Negative twins: non-writer stages, zero or invalid limits, past-the-max, changed frozen request, duplicate reservation, failure/cancellation and concurrent calls must not delegate or reset spend. Existing native_stages and synthesis_only behavior stays unchanged.",
+    "Preparation invokes no runtime factory/startup/health/generation; source, input, profile, seed or receipt mismatch stops before dispatch.",
+    "Reuse exact existing seven-owner frozen lane on the final implementation head. Do not add a bespoke fidelity scorer.",
+    "Validate launcher/output-parent ownership using existing evidence output helper and tests; no recursive creation or existing-evidence overwrite."
+  ],
+  "live_authorization": {
+    "authorized_completions": 0,
+    "authorized_native_preflights": 0,
+    "authorized_server_startups": 0,
+    "later_budget": "Not yet requested. Initial section totals are not a completion ceiling; optional split children and admission searches must be counted from the accepted run mode before operator approval."
+  },
+  "implementation_summary": "Implemented the accepted offline adapter at fbd9e43c3f25b06aa1d8387292d16444af35b647. Shared explicit writer budget and frozen request/probe binding, production-seed planning and pure product-profile admission are test-only. Existing modes, production writer/settings, prompts and schemas remain unchanged. Both frozen inputs have a diagnostic prepared plan; stage entry remains blocked without supplied valid Analyze/profile/runtime artifacts. No live authority.",
+  "cold_diff_audit": {
+    "budget_owner": "src-tauri/tests/support/live_runtime.rs:110,184 \u2014 writer limits, exact canonical request/probe binding and terminal/replay reservations; historical modes retain caps and observation shape.18adjacent tests and4core mutants.",
+    "planner_owner": "whole_document.rs:1529 \u2014 cfg(test) delegation to existing SourceInput::new/plan using generation_seed_for_run; serialized ModelRequest bytes, not approved wire bodies.",
+    "profile_owner": "model_settings.rs:149 \u2014 cfg(test) delegation to admitted_snapshot_profile/validate_admitted_snapshot_preset; no runtime/lease construction or copied policy.",
+    "preparation_entry": "summary.rs:6234,6306 \u2014 existing normalization/structure/chunk/planning and Analyze validator; missing prerequisites retained, no fabricated archives. Public valid/stale twins and actual frozen preparation exercised.",
+    "launcher": "scripts/c9-preproduction-parity.py:285,311 \u2014 mandatory current-source proof, frozen inputs/cases/profiles, shared exclusive durable output, offline selector only, receipt checks.31Python tests including real launcher path and refusal/tamper controls.",
+    "boundaries": "WindowsGNUlib/tests cross-compilation, all-target/all-feature strictClippy and formatting pass. Source counter/dependency/capacity/assembly/consolidation-boundary/C9/SAME60lane passes with zero model calls and complete JSON byte equality."
+  },
+  "gap_audit": {
+    "status": "NOT DONE",
+    "remaining": [
+      "Exact-head review and CI for the implementation update.",
+      "Native stage-entry prerequisites: supplied valid Analyze archives, frozen profile and runtime identity for each input. Named archive scan found no exact matching frozen document IDs; this is not an exhaustive absence claim.",
+      "Separate live contract, finite budget, complete approvals and body gates; native qualification and independent whole-draft fidelity review. All PR116/production/ready/merge holds remain."
+    ]
+  },
+  "data_dependent_request_bound": {
+    "scope": "Writer generation only; finite planning ceiling, not an authorized live budget or predicted spend.",
+    "derivation": "Each initial primary section is a nonempty disjoint ordered set of source units. split_saturated halves that primary set into two nonempty children. Each node is dispatched once. For U primary source units and S initial roots, there are at most U leaves and 2*U-S total nodes, including saturated parents. No extra consolidation generation: current finalize_progress calls deterministic assemble. Stops can occur sooner.",
+    "owners": [
+      "whole_document.rs::plan",
+      "whole_document.rs::dispatch_section",
+      "whole_document.rs::record_section",
+      "whole_document.rs::split_saturated",
+      "whole_document.rs::finalize_progress",
+      "whole_document.rs::assemble"
+    ],
+    "frozen_offline_planning_rows": [
+      {
+        "alias": "preproduction-1",
+        "source_units": 191,
+        "initial_roots": 2,
+        "additional_child_request_ceiling": 378,
+        "total_writer_request_ceiling": 380
+      },
+      {
+        "alias": "preproduction-2",
+        "source_units": 65,
+        "initial_roots": 1,
+        "additional_child_request_ceiling": 128,
+        "total_writer_request_ceiling": 129
+      }
+    ],
+    "combined_upper_bound": 509,
+    "qualification_requirement": "Recompute U and S for the final reviewed source and production run seed before any live scope; freeze actual source IDs and initial bodies. These rows use the accepted offline count seam and seed7, not a native measurement. Each later child or claim-budget readmission needs its own request binding and approval. Native preflights are counted separately; their live limit remains unrequested."
+  },
+  "proven_preproduction_baseline": {
+    "model_sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+    "server_sha256": "0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099",
+    "whole_document_reference": {
+      "runner": "summary_run.py qwen35-9b",
+      "context": 32768,
+      "temperature": 0,
+      "thinking": "off",
+      "transport": "Jinja chat over TCP",
+      "observed_slots": 4,
+      "offload": 99,
+      "flash_attention": "on",
+      "seed": "omitted; captured server default4294967295",
+      "output_allowance": 1500,
+      "cases": [
+        {
+          "prompt_tokens": 8587,
+          "output_tokens": 773
+        },
+        {
+          "prompt_tokens": 18420,
+          "output_tokens": 939
+        }
+      ],
+      "recorded_result": "Corrected native adapter reproduced both saved outputs byte-for-byte in two calls, normal stop, no retries. This proves same-input reproducibility and capacity, not complete-fidelity gold.",
+      "receipt_alias": "native-message-boundary-repair-20261007/result-summary.json",
+      "receipt_sha256": "8cc43e004e2ec3a0f644a7a2d694b1be55ba6922757c38585bea4a11b497662e"
+    },
+    "current_writer_differences": [
+      "Versioned complete normalized source and owned dependency/contextual citation registry instead of flat text. Source identities and coverage are frozen, not sampled.",
+      "Atomic-claim JSON with exact source IDs, unchanged1200-scalar text and8-source per-unit boundaries, document claim ceiling64 instead of freeform brief.",
+      "Capacity-admitted sections with initial and data-dependent child requests, persisted progress and deterministic assembly; no model consolidation call.",
+      "Current pinned native product factory: one slot, offload999, private-socket completion transport and already repaired message/thinking framing. These settings are established port decisions; do not rerun a setting experiment here.",
+      "Production generation_seed_for_run remains authoritative. Offline seed7 is only capacity evidence; do not substitute it or historical default4294967295.",
+      "Actual per-request schema/output allowance is produced by the existing budget owner. Do not apply the historical1500 allowance to the new shape.",
+      "Independent frozen fact-coverage/fidelity review after generation; original freeform parity and unchanged C9/SAME60 stay separate regression scopes."
+    ],
+    "no_new_departures": "The adapter may observe, freeze and enforce these existing choices. Any additional departure requires an explicit contract revision before implementation."
+  },
+  "branch_and_review": {
+    "integration_pr": 144,
+    "integration_head": "db454498853e2f153c9af8028cc3865cec01e41b",
+    "integration_tree": "9bb3fab5b2030de69a56ec17fbb29e4be4e17e6c",
+    "base_branch": "codex/whole-writer-qualification-offline",
+    "candidate_branch": "codex/whole-writer-qualification-adapter-contract",
+    "first_commit": "Contract only; direct operator acceptance before source/test edits.",
+    "review": "Review only the adapter delta from the integration head, about1000 changed lines or fewer. Independent mechanical integration review and final adapter exact-head review remain separate. No changes to132/141/143."
+  },
+  "operator_acceptance": {
+    "message": "I accept",
+    "scope": "Published contract-only PR145 at3adae01933d64978fd1719836e5c173f7d8ec066; offline adapter only, zero live authority",
+    "at": "2026-10-19T15:12:08.456784+00:00"
+  },
+  "implementation_surface_clarification": {
+    "evidence": "SourceInput and its planner are private to coherent. The accepted summary.rs preparation entry needs a narrow test-only delegation to reach the actual owner.",
+    "additional_path": "src-tauri/src/pipeline/summary/coherent/whole_document.rs",
+    "change": "One cfg(test) accessor delegates to SourceInput::new/plan and returns request metadata; no shipped API, algorithm, prompt, schema or capacity change.",
+    "scope": "Routine implementation surface within accepted offline preparation, not new product behavior or live authority.",
+    "additional_test_only_accessor": {
+      "path": "src-tauri/src/pipeline/model_settings.rs",
+      "change": "cfg(test) delegation to existing admitted_snapshot_profile and validate_admitted_snapshot_preset before any runtime/lease construction. This avoids a copied profile validator. The preparation remains limited to the frozen native 9B protocol."
+    }
+  },
+  "offline_proof": {
+    "tested_source": "fbd9e43c3f25b06aa1d8387292d16444af35b647",
+    "public_alias": "whole-writer-qualification-preparation-20261019/adapter-implementation/implementation-proof.json",
+    "public_sha256": "5339e5a194719637ad8beb3553892061ed9cd36e3f5140747839bd46e7b14141",
+    "private_offline_receipt_sha256": "5d21873da242cfbdbc3e69a0a76184508245f4078766b4e381d4da616a28022f",
+    "private_preparation_receipt_sha256": "090c4c7364f192eba686bb309ba53e9226169413340290e07a36c1931e5fdda3",
+    "model_calls": 0,
+    "runtime_startups": 0,
+    "wire_bodies_approved": false
+  }
+}

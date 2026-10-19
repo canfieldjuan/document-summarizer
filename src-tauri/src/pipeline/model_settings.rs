@@ -143,6 +143,24 @@ pub(super) fn offline_native_count_profile(
     ))
 }
 
+// Reuse the product factory's pure admission owners without constructing a
+// runtime, acquiring a model lease or contacting a server during preparation.
+#[cfg(test)]
+pub(crate) fn offline_whole_writer_profile(
+    snapshot: &ModelProfileSnapshot,
+) -> Result<(), ModelRuntimeFailure> {
+    if snapshot.version != 2 || snapshot.preset_id != "full-qwen35-9b-q4km-v1" {
+        return Err(config_failure(
+            "Writer preparation requires the frozen native 9B preset",
+        ));
+    }
+    validate_admitted_snapshot_preset(
+        snapshot,
+        admitted_snapshot_profile(&snapshot.analysis, false)?,
+        admitted_snapshot_profile(&snapshot.verification, true)?,
+    )
+}
+
 pub(super) const JACK_LLAMA_CPP_LIBRARIES: &[QualifiedRuntimeFile] = &[
     QualifiedRuntimeFile {
         file_name: "libllama-server-impl.so",
@@ -1588,6 +1606,42 @@ fn config_failure(message: impl Into<String>) -> ModelRuntimeFailure {
 mod tests {
     use super::*;
     use crate::pipeline::control::CancellationToken;
+
+    #[test]
+    fn offline_writer_profile_reuses_product_admission_without_a_runtime() {
+        let p = QUALIFIED_PROFILES
+            .iter()
+            .find(|p| p.profile_id == "qwen35-9b-q4km-v1")
+            .unwrap();
+        let stage = ModelStageProfileSnapshot {
+            runtime_kind: p.runtime_kind,
+            profile_id: p.profile_id.into(),
+            model_name: "frozen9b.gguf".into(),
+            model_digest: p.digest.into(),
+            context_tokens: p.safe_context_tokens,
+            tokenizer_version: p.tokenizer_version.into(),
+        };
+        let good = ModelProfileSnapshot {
+            version: 2,
+            preset_id: format!("full-{}", p.profile_id),
+            analysis: stage.clone(),
+            verification: stage,
+        };
+        offline_whole_writer_profile(&good).unwrap();
+        for i in 0..7 {
+            let mut bad = good.clone();
+            match i {
+                0 => bad.version = 1,
+                1 => bad.preset_id.clear(),
+                2 => bad.analysis.context_tokens = 32767,
+                3 => bad.analysis.context_tokens = 32769,
+                4 => bad.analysis.model_digest = "changed".into(),
+                5 => bad.verification.tokenizer_version = "changed".into(),
+                _ => bad.analysis.runtime_kind = ModelRuntimeKind::InferenceGateway,
+            }
+            assert!(offline_whole_writer_profile(&bad).is_err());
+        }
+    }
 
     fn qualified_snapshot() -> ModelProfileSnapshot {
         let profile = QUALIFIED_PROFILES[0];
