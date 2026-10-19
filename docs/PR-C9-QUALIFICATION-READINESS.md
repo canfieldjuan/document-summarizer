@@ -788,3 +788,59 @@ fresh private offline receipt SHA256
 `997c88de08adf9086cc6ab51466724ec7ad246ad28bb836566b707c0a977ac73`.
 Independent final-head review, native CI and all qualification/production holds
 remain **NOT DONE**. No new model dispatch is authorized.
+
+## Review6258507590: exact identity provenance and saturation recovery
+
+The review of `99ea8e4` was NOT PASS on a confirmed wrong-source binding.
+Blame identifies my `125837d` identity inventory and `fc41d12` scope promotion:
+a name contained in an amendment title or ordinary clause heading became the
+document's own numbering scope. Public fail-first amendment, sublease,
+"Supply Agreement Terms" and containing-declaration controls reproduce it.
+
+Docs-only `3d760e9` records the repair before implementation. Tested source
+`bbe2405a73794793cae0854695c847a067e9a524` retains opening-title/body provenance
+at the line reader (`whole_clauses.rs:763`). The single scope owner
+(`whole_clauses/dependencies.rs:667`) requires a complete normalized title,
+declared name or annex identity. Partial matches and body headings block instead
+of supplying a local target. The existing three explicit-document role words
+share one classifier; arbitrary `of this X` scope is removed. No new lexicon,
+source truncation or downstream output filter is added.
+
+Related progress repairs use one remaining-claim owner (`whole_document.rs:740`)
+and one saved-saturation split path in the runner (line 1255). A DB-reopen
+fail-first control previously returned a progress conflict after Saturated was
+saved. It now splits through the existing transactional CAS and generates only
+the children; the parent is never dispatched again. Existing concurrent split
+and dispatched-request protection controls pass. An exact filled document
+allowance is still not proof of coverage: the 32+32 case reports document claim
+capacity rather than section/context saturation; 32+31 can assemble. The accepted
+ceiling and conservative stop remain; this does not approve exact-fill output.
+
+Proof: 76 readiness tests pass / 5 ignored; five causal mutants are killed
+(window match, body-heading promotion, arbitrary current scope, recovery refusal,
+wrong cap diagnostic). Strict Clippy, formatting and Windows GNU lib/test checking
+pass; integration targets pass 5, 20 with 3 ignored, and 26. The new broad Rust
+run remains **FAILED**: 1050 passed / 2 failed / 40 ignored, in the unchanged
+gateway-store tests tracked by issue140. Both exact isolated tests pass; that
+does not fix or waive their intermittent failure. Python/script/workflow bytes
+have no diff from `99ea8e4`; its 43-test proof is reused, not rerun.
+
+The fresh mandatory seven-owner offline gate passes with zero model calls.
+Complete dependency, capacity, assembly and SAME60 JSON are each byte-identical
+to the preceding reviewed source. There are no reference classification deltas;
+both frozen inputs remain free of unresolved/blocked dependencies. This prose
+record changes no relevant source after the tested commit.
+
+Durable alias `writer-identity-review-20261018/review-repair-proof.json`, SHA256
+`c5e88cf747079d47a21b1e725e4d6590ac582f62036b30be1309e13938e32bc2`,
+binds fail-before/pass-after logs, mutations, source freeze, cold audit and gates.
+Private offline receipt SHA256
+`50b3aba1e3ea29720e2ffcb845e17eec28e44f55f39775833afdccf335148e71`.
+
+Still deferred and not claimed fixed: unsupported preposed/multi-target opaque
+forms (fail closed), numeric-name terminal punctuation, admission-carrier
+redundancy, resumed-progress preflight, direct Verify preflight coverage,
+held-claim page coverage, and packing blocks with no clause. These nonblocking
+items do not create additional repair slices here. Published history is retained;
+contract changes stay in docs-only commits. **NOT DONE** for new-head native CI,
+independent review, qualification, live, production, ready or merge clearance.

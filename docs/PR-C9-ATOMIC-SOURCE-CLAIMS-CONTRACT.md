@@ -1097,7 +1097,8 @@ surrounding quotes/terminal period removed, is the identity, not any substring.
 An ordinary `This ...` introduction is only an ambiguity signal, never sufficient
 ownership. Declarations outside the opening do not declare the whole document.
 Preposed opaque names remain unsupported and blocking; no new preposed grammar
-is admitted. Restore the pre-existing document/agreement/contract forms for
+is admitted. The new opaque form is singular; multi-target opaque references
+also remain unsupported and blocking. Restore the pre-existing document/agreement/contract forms for
 `of this ...`; Article/Exhibit/Schedule do not silently acquire whole-document
 scope through an arbitrary alphabetic noun.
 
