@@ -2,8 +2,8 @@
 
 ## Status, branch and scope
 
-PROPOSED. Contract only; stop for the operator's direct acceptance before source
-or test edits. Tracks issue #142. Use `codex/completed-section-resume`, based on
+ACCEPTED directly by the operator: "I accept". Contract-only acceptance
+recorded before source or test edits. Tracks issue #142. Use `codex/completed-section-resume`, based on
 published writer head `b9de4f737bef82dfcca3f11f833a29214917df28`; later publish as
 its own small PR with base `codex/c9-qualification-readiness`. Keep #132 frozen
 and #141 separate. Do not merge this work into either branch. The specific
@@ -58,7 +58,7 @@ framing/template and response hashes stay authoritative; this repair does not
 run that model or change any of those settings. The writer's existing approved
 differences from that capture remain recorded in its inherited contract.
 
-Proposed departures, explicitly requiring acceptance:
+Accepted departures:
 
 - Historical Completed/Split section requests cease receiving backend
   admission. Pending requests still require admission; a Saturated parent's
@@ -72,6 +72,14 @@ Proposed departures, explicitly requiring acceptance:
   do not add a resume-only exemption or a hidden flag. Other synthesis policies
   keep their current behavior. This is an amendment to early Verify admission,
   not a claim that the old guard was purely local or that fidelity is waived.
+  A future Verify admission failure is persisted by the Verify stage rather
+  than aborting Synthesize; the complete synthesized artifact remains durable.
+  Keep backend failure codes: MODEL_VERIFICATION_ADMISSION is the diagnostic
+  context, not a replacement for the backend code. No extra generation.
+  Verify admission remains the sole backend admission owner for Verify work;
+  its existing gate is unchanged. The non-whole-document path through
+  coherent_verification_exceeds_runtime_context, including the
+  VERIFICATION_INPUT_TOO_LARGE fallback, remains untouched.
 
 ## Required change surface and non-scope
 
@@ -139,7 +147,7 @@ No implementation or tests have been changed. The contract is the only proposed
 diff. No tests are rerun for this documentation-only commit. Preserve the earlier
 baseline receipt with its exercised source, without claiming it tested a repair.
 
-**NOT DONE:** direct operator acceptance, fail-first reproduction, source fix,
+**NOT DONE:** fail-first reproduction, source fix,
 regression/mutation proof, frozen comparison, publication, native CI and
 independent review remain. All PR116, qualification, live, production, ready and
 merge holds remain. Live model budget for this proposal: zero.
