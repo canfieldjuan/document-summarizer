@@ -765,3 +765,26 @@ The private offline receipt SHA256 is
 the complete SAME60 result remains
 `ceee845cb539968ed40b87185484496e08f455057040665352559cf96b2e5b53`.
 **NOT DONE for qualification, production or merge.** All existing holds remain.
+
+### Single-owner consolidation after the sent-diff audit
+
+The push seam audit found that `fc41d12` repeated heading/annex matching in the
+ownership predicate and scope selector. `6596eb81cf23363f6ff3c299873bcff32a2e0481`
+removes the predicate and gives `owned_namespace_origin` both decisions. It
+returns unowned, owned-but-unclean, or a clean owning scope. There is no new
+grammar, list or policy. Readiness remains 71 passed / 5 ignored; all three branch
+mutants are killed; strict Clippy, formatting and Windows cross-check pass.
+
+The installed hook refused the preceding receipt as stale for this changed
+source. A fresh complete seven-owner offline run then passed with zero model
+calls. Its dependency, capacity, assembly and SAME60 JSON files are each
+byte-identical to the preceding proof. This prose-only record introduces no
+relevant source difference after that tested commit. The unrelated broad-suite
+failure remains recorded, not replaced by a green retry.
+
+Durable alias `writer-review-repair-20261018/single-owner-final-proof.json`,
+SHA256 `3451fe46aaad70bc76420979cb41d9ecaf71c55001851a2e3e7d289f92078db1`;
+fresh private offline receipt SHA256
+`997c88de08adf9086cc6ab51466724ec7ad246ad28bb836566b707c0a977ac73`.
+Independent final-head review, native CI and all qualification/production holds
+remain **NOT DONE**. No new model dispatch is authorized.
