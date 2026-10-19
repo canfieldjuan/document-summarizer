@@ -189,6 +189,37 @@ pub(super) fn admit(
     Ok(Some(candidate))
 }
 
+/// Size the number of whole claims, never their text, through the existing
+/// estimator and backend boundary. The caller re-admits the canonical new shape.
+pub(super) fn admitted_claim_count(
+    runtime: &dyn ModelRuntime,
+    request: &ModelRequest,
+) -> Result<usize, PipelineFailure> {
+    let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
+        return Err(invalid_budget());
+    };
+    let Some(capacity) = available_output(runtime, request, false)? else {
+        return Ok(0);
+    };
+    let maximum = maximum_characters(request)?;
+    let limit = maximum_claims_for_schema(name);
+    let count = schema["properties"]["units"]["maxItems"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0 && *n <= limit)
+        .ok_or_else(invalid_budget)?;
+    let mut candidate = schema.clone();
+    for count in (1..=count).rev() {
+        candidate["properties"]["units"]["maxItems"] = json!(count);
+        if response_tokens_for_protocol(&candidate, maximum, limit).ok_or_else(invalid_budget)?
+            <= capacity
+        {
+            return Ok(count);
+        }
+    }
+    Ok(0)
+}
+
 /// The admitted schema owns the ceiling for parsing and every recovery path.
 pub(super) fn maximum_characters(request: &ModelRequest) -> Result<usize, PipelineFailure> {
     let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
@@ -199,6 +230,39 @@ pub(super) fn maximum_characters(request: &ModelRequest) -> Result<usize, Pipeli
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0 && *n <= MAX_UNIT_CHARACTERS)
         .ok_or_else(invalid_budget)
+}
+
+/// Read-only diagnostics through the same cost and backend admission owners.
+/// This does not change the request, admit a smaller schema, or generate text.
+#[cfg(test)]
+pub(super) fn diagnose_reservation(
+    runtime: &dyn ModelRuntime,
+    request: &ModelRequest,
+) -> Result<Value, PipelineFailure> {
+    let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
+        return Err(invalid_budget());
+    };
+    let maximum = maximum_characters(request)?;
+    let limit = maximum_claims_for_schema(name);
+    let capacity = available_output(runtime, request, false)?;
+    let required =
+        response_tokens_for_protocol(schema, maximum, limit).ok_or_else(invalid_budget)?;
+    let mut costs = Vec::new();
+    for count in 1..=limit {
+        let mut shape = schema.clone();
+        shape["properties"]["units"]["maxItems"] = json!(count);
+        costs.push((
+            count,
+            response_tokens_for_protocol(&shape, maximum, limit).ok_or_else(invalid_budget)?,
+        ));
+    }
+    Ok(
+        json!({"context_tokens":runtime.context_tokens(PipelineStage::Synthesize),
+        "maximum_unit_characters":maximum,"schema_claim_count":schema["properties"]["units"]["maxItems"],
+        "required_output_tokens":required,"available_output_tokens":capacity,
+        "full_claims_fitting_unchanged_input":costs.iter().filter(|(_,cost)|capacity.is_some_and(|n|*cost<=n)).map(|(count,_)|*count).max().unwrap_or(0),
+        "one_claim_output_tokens":costs[0].1}),
+    )
 }
 
 pub(super) fn validate_response(

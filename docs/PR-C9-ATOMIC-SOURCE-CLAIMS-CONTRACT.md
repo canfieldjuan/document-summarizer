@@ -1042,3 +1042,25 @@ grouped push with the Windows repair and independent exact-head review.
 Non-scope: no model calls, GPU/server startup, new generation budget, fidelity
 threshold changes, private-label tuning, partial delivery, ordinary-build
 enablement, production adoption, ready or merge clearance. Existing holds remain.
+
+### Source-owner consolidation clarification from offline evidence
+
+The new both-unowned rule applies to the newly admitted **opaque-name form**.
+It does not replace the established explicit-document/numeric-namespace grammar
+with a global-number test. That attempted consolidation was a porting regression:
+the actual frozen source measurement changed A to three unresolved references
+and B to three, blocking both documents. No model was run. The reader now retains
+`ExplicitDocument` versus `OpaqueName` as typed metadata; one resolver checks
+owned names for both. Only opaque names also need an absent local number. An
+explicit foreign document's section number does not acquire local identity just
+because the same digits occur here. No document/law names or abbreviations are
+looked up. Existing structural document-role words describe the supported grammar,
+not proof of absence; they no longer bypass the ownership decision.
+
+The same line reader retains headings, introductions and supported explicit
+self-name declarations as distinct identity signals. Mentioning another document
+in ordinary prose does not create a self-name. Known-name and opaque-name
+references to an owned heading/self-name stay unresolved rather than becoming a
+false external. These source-only controls precede remeasurement of both inputs;
+no test labels or source bytes change. The final private report must explain
+every reference-record delta, not merely report zero blocking counts.

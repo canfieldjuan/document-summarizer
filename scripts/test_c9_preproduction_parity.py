@@ -18,6 +18,148 @@ class ReachedLaunch(Exception):
     """Stop before any Rust subprocess or model call."""
 
 
+class OfflineBaselineGateTests(unittest.TestCase):
+    def test_native_push_gate_refuses_missing_and_stale_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);pointer=root/'pointer.json';head='a'*40
+            update=f'refs/heads/codex/test {head} refs/heads/codex/test '+('0'*40)+'\n'
+            with mock.patch.object(parity,'command',return_value=head),mock.patch.object(parity,'require_offline_baseline') as proof:
+                with self.assertRaisesRegex(ValueError,'missing mandatory offline proof'):
+                    parity.check_offline_push(update.encode(),pointer)
+                import json
+                receipt=root/'receipt.json';receipt.write_text('{}')
+                pointer.write_text(json.dumps({'path':str(receipt),'sha256':parity.sha(receipt)}))
+                parity.check_offline_push(update.encode(),pointer);proof.assert_called_once_with(receipt)
+                receipt.write_text('changed')
+                with self.assertRaisesRegex(ValueError,'receipt changed'):
+                    parity.check_offline_push(update.encode(),pointer)
+                with self.assertRaisesRegex(ValueError,'tested current checkout'):
+                    parity.check_offline_push(update.replace(head,'b'*40).encode(),pointer)
+                with self.assertRaisesRegex(ValueError,'invalid Git push'):
+                    parity.check_offline_push(b'partial update\n',pointer)
+
+    def test_hook_install_is_idempotent_and_preserves_prior_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            common=Path(tmp);hooks=common/'hooks';hooks.mkdir()
+            hook=hooks/'pre-push';original=b'#!/bin/sh\nexit 9\n';hook.write_bytes(original);hook.chmod(0o700)
+            with mock.patch.object(parity,'command',return_value=str(common)):
+                parity.install_offline_gate();parity.install_offline_gate()
+            self.assertEqual((hooks/'pre-push.before-docsum-baseline').read_bytes(),original)
+            self.assertEqual(hook.read_bytes(),(parity.REPO/'scripts/preproduction-pre-push.py').read_bytes())
+
+    def test_native_hook_honors_prior_hook_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            parity.subprocess.run(['git','init','--quiet',str(root)],check=True)
+            prior=root/'.git/hooks/pre-push.before-docsum-baseline'
+            prior.write_text('#!/bin/sh\nexit 9\n');prior.chmod(0o700)
+            hook=parity.REPO/'scripts/preproduction-pre-push.py'
+            result=parity.subprocess.run([parity.sys.executable,str(hook)],cwd=root,input=b'',capture_output=True)
+            self.assertEqual(result.returncode,9,result.stderr)
+
+    def test_native_hook_inspects_pushed_commit_not_current_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def git(*args):
+                return parity.subprocess.check_output(['git',*args],cwd=root,text=True,stderr=parity.subprocess.STDOUT).strip()
+            git('init','--quiet');git('config','user.name','Baseline fixture');git('config','user.email','fixture@example.invalid')
+            (root/'README').write_text('public fixture')
+            git('add','README');git('commit','--quiet','-m','before writer');old=git('rev-parse','HEAD')
+            marker=root/'src-tauri/src/pipeline/summary/coherent/whole_document.rs'
+            marker.parent.mkdir(parents=True);marker.write_text('// public writer fixture')
+            git('add','src-tauri');git('commit','--quiet','-m','writer');writer=git('rev-parse','HEAD')
+            git('switch','--detach',old)
+            hook=parity.REPO/'scripts/preproduction-pre-push.py'
+            def push(head):
+                update=f'refs/heads/codex/fixture {head} refs/heads/codex/fixture '+('0'*40)+'\n'
+                return parity.subprocess.run([parity.sys.executable,str(hook)],cwd=root,input=update.encode(),capture_output=True)
+            self.assertEqual(push(old).returncode,0,'unrelated branches do not adopt this writer gate')
+            result=push(writer)
+            self.assertNotEqual(result.returncode,0,'another checkout must not bypass the writer baseline')
+            self.assertIn(b'tested checkout',result.stderr)
+
+    def test_no_matching_test_is_not_a_pass(self):
+        for text in ['test result: ok. 0 passed; 0 failed; 0 ignored;',
+                     'test result: ok. 0 passed; 0 failed; 1 ignored;',
+                     'test result: FAILED. 1 passed; 1 failed; 0 ignored;']:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parity.require_exact_test_pass(text)
+        parity.require_exact_test_pass('test result: ok. 1 passed; 0 failed; 0 ignored;')
+
+    def test_receipt_refuses_missing_stale_inputs_and_changed_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            receipt=root/'receipt.json'
+            source={'files':{'source.rs':'current'}}
+            with mock.patch.object(parity, 'offline_source', return_value=source), \
+                    mock.patch.object(parity, 'offline_manifest', return_value={'version':1}), \
+                    mock.patch.object(parity,'verify_frozen_inputs'), \
+                    mock.patch.object(parity,'verify_offline_results'), \
+                    mock.patch.object(parity,'verify_summary_capture'):
+                with self.assertRaises(FileNotFoundError): parity.require_offline_baseline(receipt)
+                for name,_,_ in parity.OFFLINE_TESTS:
+                    (root/(name+'.log')).write_text('test result: ok. 1 passed; 0 failed; 0 ignored;')
+                for name in ('summary-baseline.json','dependencies.json','capacity.json','assembly.json','same60.json'):
+                    (root/name).write_text('{}')
+                value={'phase':'writer-offline','passed':True,'actual_calls':0,
+                       'frozen_inputs':{},'summary_packet':str(root),
+                       'source':source,'baseline':{'version':1},
+                       'artifacts':{p.name:parity.sha(p) for p in root.iterdir()},
+                       'commands':[{'name':name,'exit':0} for name,_,_ in parity.OFFLINE_TESTS]}
+                import json
+                receipt.write_text(json.dumps(value))
+                parity.require_offline_baseline(receipt)
+                for key,bad in [('passed',False),('passed',1),('actual_calls',False),
+                                ('actual_calls',1),('source',{'files':{}}),('baseline',{}),
+                                ('commands',[]),('artifacts',{})]:
+                    changed=copy.deepcopy(value);changed[key]=bad;receipt.write_text(json.dumps(changed))
+                    with self.subTest(key=key,bad=bad),self.assertRaises(ValueError):parity.require_offline_baseline(receipt)
+                receipt.write_text(json.dumps(value));(root/'counter.log').write_text('changed proof')
+                with self.assertRaises(ValueError):parity.require_offline_baseline(receipt)
+
+    def test_changed_frozen_document_refuses_even_with_unchanged_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import json
+            root=Path(tmp);document=root/'document.txt';document.write_text('public original text')
+            packet=root/'packet.json';packet.write_text(json.dumps({'inputs':[{'path':str(document),'sha256':parity.sha(document)}]}))
+            frozen={'source_packet':{'path':str(packet),'sha256':parity.sha(packet)}}
+            pins={'inputs':{'source_packet':parity.sha(packet)}}
+            parity.verify_frozen_inputs(frozen,pins)
+            document.write_text('changed document')
+            with self.assertRaisesRegex(ValueError,'document bytes changed'):
+                parity.verify_frozen_inputs(frozen,pins)
+
+    def test_complete_results_require_admission_ownership_and_full_assembly(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def write(name,value): (root/name).write_text(json.dumps(value))
+            write('dependencies.json',{});write('same60.json',{})
+            ownership={'normalized':'public source','source_units':['unit'],'anchors':['anchor'],'omitted_standalone_quote_segments':0}
+            row={**ownership,'governing_units_with_zero_anchors':0,'contextual_anchor_coverage_gaps':0,
+                 'result':{'alias':'control','status':'drafts_admitted','drafts':[{'maximum_unit_characters':1200,'maximum_units':2,'output_allowance_tokens':4096}]}}
+            capacity={'status':'draft_planning_only','inputs':[row]};write('capacity.json',capacity)
+            assembly={'claims':list(range(40)),'evidence':['public'],'lineage':list(range(40))};write('assembly.json',{'assembly':assembly})
+            pins={'dependency_report_sha256':parity.sha(root/'dependencies.json'),'same60_expected_sha256':parity.sha(root/'same60.json'),
+                  'writer_source_ownership':{'control':parity.canonical_digest(ownership)},
+                  'canonical_assembly_sha256':parity.canonical_digest({k:assembly[k] for k in ('claims','evidence')})}
+            parity.verify_offline_results(root,pins)
+            bad=[]
+            changed=copy.deepcopy(capacity);changed['status']='diagnostic_only_not_admission';bad.append(changed)
+            changed=copy.deepcopy(capacity);changed['inputs']=[];bad.append(changed)
+            changed=copy.deepcopy(capacity);changed['inputs'][0]['normalized']='different source';bad.append(changed)
+            for key,value in [('maximum_unit_characters',39),('maximum_units',0),('maximum_units',65),('maximum_units',True),('output_allowance_tokens',False)]:
+                changed=copy.deepcopy(capacity);changed['inputs'][0]['result']['drafts'][0][key]=value;bad.append(changed)
+            for value in [1,False]:
+                changed=copy.deepcopy(capacity);changed['inputs'][0]['contextual_anchor_coverage_gaps']=value;bad.append(changed)
+            for changed in bad:
+                write('capacity.json',changed)
+                with self.assertRaises(ValueError):parity.verify_offline_results(root,pins)
+            write('capacity.json',capacity)
+            assembly['claims'].pop();write('assembly.json',{'assembly':assembly})
+            with self.assertRaises(ValueError):parity.verify_offline_results(root,pins)
+
+
 class OutputPermissionsTests(unittest.TestCase):
     def summary_args(self, root, out):
         packet = root / 'packet'
@@ -212,7 +354,8 @@ class OutputPermissionsTests(unittest.TestCase):
                 '--lock', str(lock), '--output', str(out), '--deployment', str(root / 'deployment'),
                 '--model', str(root / 'model'), '--settings', str(root / 'settings'),
                 '--gguf', str(root / 'gguf'), '--server', str(root / 'server'),
-                '--native-receipt', str(root / 'native-receipt')]
+                '--native-receipt', str(root / 'native-receipt'),
+                '--offline-baseline-receipt',str(root/'offline-receipt')]
         with contextlib.ExitStack() as stack:
             def patch(owner, name, **kwargs):
                 return stack.enter_context(mock.patch.object(owner, name, **kwargs))
@@ -227,6 +370,7 @@ class OutputPermissionsTests(unittest.TestCase):
             patch(parity, 'sha', return_value='pin')
             patch(parity, 'validate_receipt')
             patch(parity, 'verify_artifacts')
+            patch(parity, 'require_offline_baseline')
             owner = patch(parity, 'prepare_evidence_output', wraps=parity.prepare_evidence_output)
             gpu = patch(parity, 'gpu')
             reserve = patch(parity, 'reserve_gateway')

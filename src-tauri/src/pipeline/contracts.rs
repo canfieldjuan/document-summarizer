@@ -715,10 +715,13 @@ impl WholeDocumentProgress {
         let mut open = false;
         for section in &self.sections {
             match section.state {
-                WholeDocumentSectionState::Completed { .. } if !open => {}
+                WholeDocumentSectionState::Completed { .. }
+                | WholeDocumentSectionState::Split { .. }
+                    if !open => {}
                 WholeDocumentSectionState::Pending => open = true,
                 WholeDocumentSectionState::Dispatched
                 | WholeDocumentSectionState::Failed { .. }
+                | WholeDocumentSectionState::Saturated { .. }
                     if !open =>
                 {
                     open = true
@@ -747,6 +750,12 @@ pub enum WholeDocumentSectionState {
     Completed {
         response: WholeDocumentSectionResponse,
     },
+    Saturated {
+        response: WholeDocumentSectionResponse,
+    },
+    Split {
+        response: WholeDocumentSectionResponse,
+    },
     Failed {
         failure: PipelineFailure,
     },
@@ -760,6 +769,106 @@ pub struct WholeDocumentSectionResponse {
     pub runtime_id: String,
     pub model_id: String,
     pub request_attempts: Vec<ModelRequestAttemptDiagnostic>,
+}
+
+impl WholeDocumentSection {
+    pub(crate) fn permits_dispatch(&self, next: &Self) -> bool {
+        if self.primary != next.primary
+            || !matches!(self.state, WholeDocumentSectionState::Pending)
+            || !matches!(next.state, WholeDocumentSectionState::Dispatched)
+        {
+            return false;
+        }
+        let mut expected = self.request.clone();
+        let (
+            ModelOutputFormat::JsonSchema { schema: old, .. },
+            ModelOutputFormat::JsonSchema { schema: new, .. },
+        ) = (&mut expected.output_format, &next.request.output_format)
+        else {
+            return false;
+        };
+        let (Some(old_count), Some(new_count)) = (
+            old["properties"]["units"]["maxItems"].as_u64(),
+            new["properties"]["units"]["maxItems"].as_u64(),
+        ) else {
+            return false;
+        };
+        if new_count == 0 || new_count > old_count {
+            return false;
+        }
+        old["properties"]["units"]["maxItems"] = serde_json::json!(new_count);
+        let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&expected.user_prompt)
+        else {
+            return false;
+        };
+        payload["maximum_units"] = serde_json::json!(new_count);
+        expected.user_prompt = payload.to_string();
+        expected.max_output_tokens = next.request.max_output_tokens;
+        expected == next.request
+            && next.request.integrity_sha256().ok().as_ref() == Some(&next.request_sha256)
+    }
+}
+
+impl WholeDocumentProgress {
+    /// A saturated request is immutable history. Only its smaller pending
+    /// children are new work; completed siblings and all header pins are kept.
+    pub(crate) fn permits_split(&self, next: &Self) -> bool {
+        let Some(index) = self
+            .sections
+            .iter()
+            .position(|s| matches!(s.state, WholeDocumentSectionState::Saturated { .. }))
+        else {
+            return false;
+        };
+        let added = next.sections.len().saturating_sub(self.sections.len());
+        if added < 2 || self.sections[..index] != next.sections[..index] {
+            return false;
+        }
+        let parent = &self.sections[index];
+        let mut expected = parent.clone();
+        let WholeDocumentSectionState::Saturated { response } = &parent.state else {
+            return false;
+        };
+        expected.state = WholeDocumentSectionState::Split {
+            response: response.clone(),
+        };
+        if next.sections[index] != expected || parent.primary.len() < 2 {
+            return false;
+        }
+        let children = &next.sections[index + 1..index + 1 + added];
+        if children.iter().any(|s| {
+            s.primary.is_empty()
+                || s.primary.len() >= parent.primary.len()
+                || !matches!(s.state, WholeDocumentSectionState::Pending)
+        }) || children
+            .iter()
+            .flat_map(|s| s.primary.iter())
+            .ne(parent.primary.iter())
+        {
+            return false;
+        }
+        for (old, new) in self.sections[index + 1..]
+            .iter()
+            .zip(&next.sections[index + 1 + added..])
+        {
+            if !matches!(old.state, WholeDocumentSectionState::Pending) {
+                return false;
+            }
+            let mut expected = old.clone();
+            let Some(ordinal) = expected.request.ordinal.checked_add(added as u32) else {
+                return false;
+            };
+            expected.request.ordinal = ordinal;
+            let Ok(hash) = expected.request.integrity_sha256() else {
+                return false;
+            };
+            expected.request_sha256 = hash;
+            if expected != *new {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

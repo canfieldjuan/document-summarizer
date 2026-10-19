@@ -230,36 +230,52 @@ class SupervisorBoundariesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             with mock.patch.object(self.owner.evidence, 'EVIDENCE_ROOTS', (out.parent,)), \
+                    mock.patch.object(self.owner.evidence, 'require_offline_baseline'), \
                     mock.patch.object(self.owner.subprocess, 'run', return_value=
                                       subprocess.CompletedProcess([], 0, '', '')) as launch:
-                self.owner.launch_detached(['public-driver'], out, out,
-                                           'docsum-qualification-fixture', 1800)
+                proof=out/'offline.json';proof.write_text('{}')
+                self.owner.launch_detached(['public-driver'], self.owner.evidence.REPO, out,
+                                           'docsum-qualification-fixture', 1800, proof)
                 args = launch.call_args.args[0]
                 for expected in ['--property=RuntimeMaxSec=1800', '--property=Restart=no',
                                  '--property=KillMode=control-group', '--property=TimeoutStopSec=10']:
                     self.assertIn(expected, args)
                 self.assertTrue(any(arg.startswith('--property=ExecStopPost=') for arg in args))
                 with self.assertRaises(FileExistsError):
-                    self.owner.launch_detached(['public-driver'], out, out,
-                                               'docsum-qualification-fixture', 1800)
+                    self.owner.launch_detached(['public-driver'], self.owner.evidence.REPO, out,
+                                               'docsum-qualification-fixture', 1800, proof)
                 self.assertEqual(launch.call_count, 1)
 
     def test_rejected_launch_does_not_run_or_reserve(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             with mock.patch.object(self.owner.evidence, 'EVIDENCE_ROOTS', (out.parent,)), \
+                    mock.patch.object(self.owner.evidence, 'require_offline_baseline'), \
                     mock.patch.object(self.owner.subprocess, 'run') as launch:
+                proof=out/'offline.json';proof.write_text('{}')
                 for unit, deadline in [('foreign-service', 1800),
                                        ('docsum-qualification-good', 0),
                                        ('docsum-qualification-good', 1801)]:
                     with self.subTest(unit=unit, deadline=deadline), self.assertRaises(ValueError):
-                        self.owner.launch_detached(['public-driver'], out, out, unit, deadline)
+                        self.owner.launch_detached(['public-driver'], self.owner.evidence.REPO, out, unit, deadline, proof)
                 out.chmod(0o755)
                 with self.assertRaises(ValueError):
-                    self.owner.launch_detached(['public-driver'], out, out,
-                                               'docsum-qualification-good', 1800)
+                    self.owner.launch_detached(['public-driver'], self.owner.evidence.REPO, out,
+                                               'docsum-qualification-good', 1800, proof)
                 self.assertFalse((out/'detached-launch.json').exists())
                 launch.assert_not_called()
+
+    def test_missing_or_failed_offline_baseline_never_launches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)
+            with mock.patch.object(self.owner.subprocess,'run') as launch:
+                with self.assertRaisesRegex(ValueError,'mandatory offline baseline'):
+                    self.owner.launch_detached(['public-driver'],self.owner.evidence.REPO,out,'docsum-qualification-fixture',1800)
+                with mock.patch.object(self.owner.evidence,'require_offline_baseline',side_effect=ValueError('stale source')):
+                    with self.assertRaisesRegex(ValueError,'stale source'):
+                        self.owner.launch_detached(['public-driver'],self.owner.evidence.REPO,out,'docsum-qualification-fixture',1800,out/'receipt')
+                launch.assert_not_called()
+                self.assertFalse((out/'detached-launch.json').exists())
 
 
 if __name__ == '__main__':

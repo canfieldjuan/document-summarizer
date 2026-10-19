@@ -51,6 +51,20 @@ fn invalid_source() -> PipelineFailure {
     )
 }
 
+fn section_claim_limit(request: &ModelRequest) -> Result<usize, PipelineFailure> {
+    let ModelOutputFormat::JsonSchema { name, schema } = &request.output_format else {
+        return Err(invalid_source());
+    };
+    if name != WHOLE_DOCUMENT_SCHEMA_NAME {
+        return Err(invalid_source());
+    }
+    schema["properties"]["units"]["maxItems"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0 && *n <= MAX_VERIFICATION_BATCHES)
+        .ok_or_else(invalid_source)
+}
+
 impl<'a> SourceInput<'a> {
     pub(super) fn new(
         normalized: &'a NormalizedDocument,
@@ -334,6 +348,35 @@ impl<'a> SourceInput<'a> {
         Ok(result)
     }
 
+    fn source_coverage_warnings(&self) -> Vec<PipelineWarning> {
+        let blocks = self
+            .normalized
+            .pages
+            .iter()
+            .flat_map(|p| &p.content)
+            .collect::<Vec<_>>();
+        self.units
+            .iter()
+            .flat_map(|unit| &unit.external)
+            .map(|external| {
+                let block = external["block"].as_u64().expect("owned external block") as usize;
+                let start = external["start"].as_u64().expect("owned external start") as usize;
+                let end = external["end"].as_u64().expect("owned external end") as usize;
+                PipelineWarning {
+                    code: "SUMMARY_EXTERNAL_SOURCE_UNAVAILABLE".into(),
+                    message: format!(
+                        "Source reference \"{}\": {}.",
+                        &blocks[block].text[start..end],
+                        external["detail"]["disclosure"]
+                            .as_str()
+                            .expect("owned external disclosure")
+                    ),
+                    stage: Some(PipelineStage::Synthesize),
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn validate_saved_synthesis(
         &self,
         synthesized: &SynthesizedDocument,
@@ -352,6 +395,16 @@ impl<'a> SourceInput<'a> {
                         | "SUMMARY_FURNITURE_PAGES_EXCLUDED"
                 )
             })
+        {
+            return Err(invalid_document());
+        }
+        if synthesized
+            .warnings
+            .iter()
+            .filter(|w| w.code == "SUMMARY_EXTERNAL_SOURCE_UNAVAILABLE")
+            .cloned()
+            .collect::<Vec<_>>()
+            != self.source_coverage_warnings()
         {
             return Err(invalid_document());
         }
@@ -392,6 +445,7 @@ impl<'a> SourceInput<'a> {
             render_cited_summary_with_evidence(&assembly.claims, &assembly.evidence)?;
         finished.summary_claims = assembly.claims;
         finished.synthesis_evidence = assembly.evidence;
+        finished.warnings.extend(self.source_coverage_warnings());
         self.validate_saved_synthesis(&finished)?;
         *synthesized = finished;
         Ok(())
@@ -399,12 +453,21 @@ impl<'a> SourceInput<'a> {
 
     #[cfg(test)]
     pub(super) fn full_projection(&self) -> Result<(String, Value), PipelineFailure> {
-        let projection = self.projection(&(0..self.units.len()).collect::<Vec<_>>())?;
+        let projection = self.projection(
+            &(0..self.units.len()).collect::<Vec<_>>(),
+            MAX_VERIFICATION_BATCHES,
+        )?;
         Ok((projection.prompt, projection.schema))
     }
 
-    fn projection(&self, primary: &[usize]) -> Result<Projection, PipelineFailure> {
+    fn projection(
+        &self,
+        primary: &[usize],
+        maximum_units: usize,
+    ) -> Result<Projection, PipelineFailure> {
         if primary.is_empty()
+            || maximum_units == 0
+            || maximum_units > MAX_VERIFICATION_BATCHES
             || primary.windows(2).any(|p| p[0] >= p[1])
             || primary.iter().any(|&i| i >= self.units.len())
         {
@@ -483,11 +546,11 @@ impl<'a> SourceInput<'a> {
             let u=&self.units[i];
             json!({"index":i,"id":u.id,"primary":primary_set.contains(&i),"spans":u.spans,"governing":u.context,"external":u.external})
         }).collect::<Vec<_>>();
-        let payload = json!({"maximum_units":MAX_VERIFICATION_BATCHES,"document":document,"sources":sources,"units":units,
+        let payload = json!({"maximum_units":maximum_units,"document":document,"sources":sources,"units":units,
             "omitted_standalone_quote_segments":catalog.omitted_source_units});
         Ok(Projection {
             prompt: serde_json::to_string(&payload).map_err(|_| invalid_source())?,
-            schema: summary_schema(&catalog, MAX_VERIFICATION_BATCHES),
+            schema: summary_schema(&catalog, maximum_units),
             catalog,
         })
     }
@@ -499,10 +562,8 @@ impl<'a> SourceInput<'a> {
         section: usize,
         seed: u64,
     ) -> Result<SourceCatalog, PipelineFailure> {
-        let projection = self.projection(primary)?;
-        let mut schema = projection.schema;
-        schema["properties"]["units"]["items"]["properties"]["text"]["maxLength"] =
-            json!(budget::maximum_characters(request)?);
+        let projection = self.projection(primary, section_claim_limit(request)?)?;
+        let schema = projection.schema;
         if request.stage != PipelineStage::Synthesize
             || request.system_prompt != SYSTEM_PROMPT
             || request.user_prompt != projection.prompt
@@ -579,6 +640,7 @@ impl<'a> SourceInput<'a> {
             || progress
                 .sections
                 .iter()
+                .filter(|s| !matches!(s.state, WholeDocumentSectionState::Split { .. }))
                 .flat_map(|s| s.primary.iter().copied())
                 .collect::<Vec<_>>()
                 != (0..self.units.len()).collect::<Vec<_>>()
@@ -599,26 +661,58 @@ impl<'a> SourceInput<'a> {
                 progress.generation_seed,
             )?;
             match &section.state {
-                WholeDocumentSectionState::Completed { response } => {
+                WholeDocumentSectionState::Completed { response }
+                | WholeDocumentSectionState::Saturated { response }
+                | WholeDocumentSectionState::Split { response } => {
                     if response.runtime_id != progress.runtime_id
                         || response.model_id != progress.model_id
                         || response.response_sha256 != text_sha256(&response.text)
                     {
                         return Err(invalid_source());
                     }
-                    parse_response_for_version(
+                    let (claims, _) = parse_response_for_version(
                         SummaryProfile::General,
                         WHOLE_DOCUMENT_VERSION,
                         &response.text,
                         &self.normalized.document_id,
                         &catalog,
-                        MAX_VERIFICATION_BATCHES,
+                        section_claim_limit(&section.request)?,
                         budget::maximum_characters(&section.request)?,
                     )?;
+                    let saturated = claims.len() == section_claim_limit(&section.request)?;
+                    if saturated
+                        != matches!(
+                            section.state,
+                            WholeDocumentSectionState::Saturated { .. }
+                                | WholeDocumentSectionState::Split { .. }
+                        )
+                    {
+                        return Err(invalid_source());
+                    }
+                    if matches!(section.state, WholeDocumentSectionState::Split { .. }) {
+                        if section.primary.len() < 2 {
+                            return Err(invalid_source());
+                        }
+                        let mut covered = Vec::<usize>::new();
+                        for child in &progress.sections[i + 1..] {
+                            if !matches!(child.state, WholeDocumentSectionState::Split { .. }) {
+                                covered.extend(&child.primary);
+                            }
+                            if covered.len() >= section.primary.len() {
+                                break;
+                            }
+                        }
+                        if covered != section.primary {
+                            return Err(invalid_source());
+                        }
+                    }
                 }
                 WholeDocumentSectionState::Pending
                 | WholeDocumentSectionState::Dispatched
                 | WholeDocumentSectionState::Failed { .. } => {}
+            }
+            if matches!(section.state, WholeDocumentSectionState::Split { .. }) {
+                continue;
             }
             drafts.push(PlannedDraft {
                 request: section.request.clone(),
@@ -652,13 +746,43 @@ impl<'a> SourceInput<'a> {
     ) -> Result<ModelRequest, PipelineFailure> {
         self.validate_runtime_binding(progress, runtime, seed)?;
         if progress.assembly_lineage.is_some()
-            || progress
-                .sections
-                .iter()
-                .take(index)
-                .any(|s| !matches!(s.state, WholeDocumentSectionState::Completed { .. }))
+            || progress.sections.iter().take(index).any(|s| {
+                !matches!(
+                    s.state,
+                    WholeDocumentSectionState::Completed { .. }
+                        | WholeDocumentSectionState::Split { .. }
+                )
+            })
         {
             return Err(invalid_source());
+        }
+        let mut signatures = HashSet::new();
+        for (ordinal, section) in progress.sections.iter().enumerate() {
+            if let WholeDocumentSectionState::Completed { response } = &section.state {
+                let catalog =
+                    self.validate_draft(&section.primary, &section.request, ordinal, seed)?;
+                let (claims, _) = parse_response_for_version(
+                    SummaryProfile::General,
+                    WHOLE_DOCUMENT_VERSION,
+                    &response.text,
+                    &self.normalized.document_id,
+                    &catalog,
+                    section_claim_limit(&section.request)?,
+                    MAX_UNIT_CHARACTERS,
+                )?;
+                for claim in claims {
+                    signatures.insert(self.claim_signature(&claim)?);
+                }
+            }
+        }
+        let remaining = MAX_VERIFICATION_BATCHES.saturating_sub(signatures.len());
+        if remaining == 0 {
+            return Err(stage_failure(
+                PipelineStage::Synthesize,
+                "WHOLE_DOCUMENT_CLAIM_CAPACITY_EXCEEDED",
+                "No document claim allowance remains for the pending source units",
+                false,
+            ));
         }
         let section = progress
             .sections
@@ -671,6 +795,19 @@ impl<'a> SourceInput<'a> {
                 "A section with a dispatched, failed or completed request cannot be sent again",
                 false,
             ));
+        }
+        if section_claim_limit(&section.request)? > remaining {
+            let replacement = self
+                .admitted_draft_with_limit(
+                    &section.primary,
+                    runtime,
+                    u32::try_from(index).map_err(|_| invalid_source())?,
+                    seed,
+                    remaining,
+                )?
+                .ok_or_else(invalid_source)?;
+            section.request = replacement.request;
+            section.request_sha256 = request_sha256(&section.request)?;
         }
         section.state = WholeDocumentSectionState::Dispatched;
         Ok(section.request.clone())
@@ -712,24 +849,86 @@ impl<'a> SourceInput<'a> {
         if !matches!(section.state, WholeDocumentSectionState::Dispatched) {
             return Err(invalid_source());
         }
-        parse_response_for_version(
+        let (claims, _) = parse_response_for_version(
             SummaryProfile::General,
             WHOLE_DOCUMENT_VERSION,
             &response.text,
             &self.normalized.document_id,
-            &plan.drafts[index].catalog,
-            MAX_VERIFICATION_BATCHES,
+            &plan
+                .drafts
+                .iter()
+                .find(|d| d.request.ordinal as usize == index)
+                .ok_or_else(invalid_source)?
+                .catalog,
+            section_claim_limit(&section.request)?,
             budget::maximum_characters(&section.request)?,
         )?;
-        progress.sections[index].state = WholeDocumentSectionState::Completed {
-            response: WholeDocumentSectionResponse {
-                text: response.text.clone(),
-                response_sha256: text_sha256(&response.text),
-                runtime_id: response.runtime_id.clone(),
-                model_id: response.model_id.clone(),
-                request_attempts: response.request_attempts.clone(),
-            },
+        let response = WholeDocumentSectionResponse {
+            text: response.text.clone(),
+            response_sha256: text_sha256(&response.text),
+            runtime_id: response.runtime_id.clone(),
+            model_id: response.model_id.clone(),
+            request_attempts: response.request_attempts.clone(),
         };
+        progress.sections[index].state = if claims.len() == section_claim_limit(&section.request)? {
+            WholeDocumentSectionState::Saturated { response }
+        } else {
+            WholeDocumentSectionState::Completed { response }
+        };
+        Ok(())
+    }
+
+    pub(super) fn split_saturated(
+        &self,
+        progress: &mut WholeDocumentProgress,
+        index: usize,
+        runtime: &dyn ModelRuntime,
+        seed: u64,
+    ) -> Result<(), PipelineFailure> {
+        self.validate_runtime_binding(progress, runtime, seed)?;
+        let parent = progress.sections.get(index).ok_or_else(invalid_source)?;
+        let WholeDocumentSectionState::Saturated { response } = &parent.state else {
+            return Err(invalid_source());
+        };
+        if parent.primary.len() < 2 {
+            return Err(stage_failure(PipelineStage::Synthesize,"WHOLE_DOCUMENT_SECTION_SATURATED",
+                format!("Indivisible source filled {} claim slots at {} characters; admitted output allowance {} tokens; complete coverage is unproven",
+                    section_claim_limit(&parent.request)?,MAX_UNIT_CHARACTERS,parent.request.max_output_tokens),false));
+        }
+        let middle = parent.primary.len() / 2;
+        let children = [&parent.primary[..middle], &parent.primary[middle..]]
+            .iter()
+            .enumerate()
+            .map(|(offset, primary)| {
+                let ordinal = u32::try_from(index + 1 + offset).map_err(|_| invalid_source())?;
+                let draft = self
+                    .admitted_draft(primary, runtime, ordinal, seed)?
+                    .ok_or_else(invalid_source)?;
+                Ok(WholeDocumentSection {
+                    primary: draft.primary,
+                    request_sha256: request_sha256(&draft.request)?,
+                    request: draft.request,
+                    state: WholeDocumentSectionState::Pending,
+                })
+            })
+            .collect::<Result<Vec<_>, PipelineFailure>>()?;
+        let mut next = progress.clone();
+        next.sections[index].state = WholeDocumentSectionState::Split {
+            response: response.clone(),
+        };
+        next.sections.splice(index + 1..index + 1, children);
+        for (ordinal, section) in next.sections.iter_mut().enumerate().skip(index + 3) {
+            if !matches!(section.state, WholeDocumentSectionState::Pending) {
+                return Err(invalid_source());
+            }
+            section.request.ordinal = u32::try_from(ordinal).map_err(|_| invalid_source())?;
+            section.request_sha256 = request_sha256(&section.request)?;
+        }
+        if !progress.permits_split(&next) {
+            return Err(invalid_source());
+        }
+        self.restore_progress(&next)?;
+        *progress = next;
         Ok(())
     }
 
@@ -787,17 +986,11 @@ impl<'a> SourceInput<'a> {
         {
             return Err(invalid_source());
         }
-        let anchors = self
-            .catalog
-            .candidates
-            .iter()
-            .zip(&self.anchors)
-            .map(|(c, a)| (c.evidence.evidence_id.as_str(), a))
-            .collect::<HashMap<_, _>>();
         let mut candidates = Vec::<CitedClaim>::new();
         let mut signatures = HashMap::new();
         let mut lineage = Vec::new();
-        for (section, (draft, response)) in plan.drafts.iter().zip(responses).enumerate() {
+        for (draft, response) in plan.drafts.iter().zip(responses) {
+            let section = draft.request.ordinal as usize;
             let catalog =
                 self.validate_draft(&draft.primary, &draft.request, section, generation_seed)?;
             if catalog != draft.catalog {
@@ -810,29 +1003,13 @@ impl<'a> SourceInput<'a> {
                 response,
                 &self.normalized.document_id,
                 &draft.catalog,
-                MAX_VERIFICATION_BATCHES,
+                section_claim_limit(&draft.request)?,
                 characters,
             )?;
             for (candidate, claim) in claims.into_iter().enumerate() {
-                let mut governing = std::collections::BTreeSet::new();
-                for id in &claim.evidence_ids {
-                    let anchor = anchors.get(id.as_str()).ok_or_else(invalid_source)?;
-                    governing.extend(
-                        self.units
-                            .get(anchor.unit)
-                            .ok_or_else(invalid_source)?
-                            .context
-                            .iter()
-                            .copied(),
-                    );
-                }
                 // Exact text AND exact excerpt identities AND complete owning
                 // source sets. No semantic or word-matching deduplication.
-                let signature = (
-                    claim.text.clone(),
-                    claim.evidence_ids.clone(),
-                    governing.into_iter().collect::<Vec<_>>(),
-                );
+                let signature = self.claim_signature(&claim)?;
                 let canonical = *signatures.entry(signature).or_insert_with(|| {
                     let i = candidates.len();
                     candidates.push(claim.clone());
@@ -908,6 +1085,51 @@ impl<'a> SourceInput<'a> {
         })
     }
 
+    fn claim_signature(
+        &self,
+        claim: &CitedClaim,
+    ) -> Result<(String, Vec<String>, Vec<usize>), PipelineFailure> {
+        let mut governing = std::collections::BTreeSet::new();
+        for id in &claim.evidence_ids {
+            let (_, anchor) = self
+                .catalog
+                .candidates
+                .iter()
+                .zip(&self.anchors)
+                .find(|(candidate, _)| candidate.evidence.evidence_id == *id)
+                .ok_or_else(invalid_source)?;
+            governing.extend(
+                self.units
+                    .get(anchor.unit)
+                    .ok_or_else(invalid_source)?
+                    .context
+                    .iter()
+                    .copied(),
+            );
+        }
+        Ok((
+            claim.text.clone(),
+            claim.evidence_ids.clone(),
+            governing.into_iter().collect(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn diagnostic_unit_request(
+        &self,
+        unit: usize,
+    ) -> Result<ModelRequest, PipelineFailure> {
+        let projection = self.projection(&[unit], MAX_VERIFICATION_BATCHES)?;
+        Ok(summary_request_for_version(
+            SummaryProfile::General,
+            WHOLE_DOCUMENT_VERSION,
+            &projection.prompt,
+            &projection.schema,
+            0,
+            7,
+        ))
+    }
+
     fn admitted_draft(
         &self,
         primary: &[usize],
@@ -915,8 +1137,25 @@ impl<'a> SourceInput<'a> {
         ordinal: u32,
         generation_seed: u64,
     ) -> Result<Option<PlannedDraft>, PipelineFailure> {
-        let projection = self.projection(primary)?;
-        let request = summary_request_for_version(
+        self.admitted_draft_with_limit(
+            primary,
+            runtime,
+            ordinal,
+            generation_seed,
+            MAX_VERIFICATION_BATCHES,
+        )
+    }
+
+    fn admitted_draft_with_limit(
+        &self,
+        primary: &[usize],
+        runtime: &dyn ModelRuntime,
+        ordinal: u32,
+        generation_seed: u64,
+        maximum_units: usize,
+    ) -> Result<Option<PlannedDraft>, PipelineFailure> {
+        let mut projection = self.projection(primary, maximum_units)?;
+        let initial = summary_request_for_version(
             SummaryProfile::General,
             WHOLE_DOCUMENT_VERSION,
             &projection.prompt,
@@ -924,8 +1163,26 @@ impl<'a> SourceInput<'a> {
             ordinal,
             generation_seed,
         );
-        let Some(request) = budget::admit(runtime, &request, true)? else {
-            return Ok(None);
+        let mut count = budget::admitted_claim_count(runtime, &initial)?;
+        let request = loop {
+            if count == 0 {
+                return Ok(None);
+            }
+            projection = self.projection(primary, count)?;
+            let request = summary_request_for_version(
+                SummaryProfile::General,
+                WHOLE_DOCUMENT_VERSION,
+                &projection.prompt,
+                &projection.schema,
+                ordinal,
+                generation_seed,
+            );
+            if let Some(request) = budget::admit(runtime, &request, false)? {
+                break request;
+            }
+            // Changing a schema/prompt can change framing on either transport.
+            // Recheck the exact final request; no assumption of identical counts.
+            count -= 1;
         };
         Ok(Some(PlannedDraft {
             request,
@@ -1049,7 +1306,9 @@ pub(in crate::pipeline::summary) fn run_sections(
     if progress.sections.iter().any(|s| {
         matches!(
             s.state,
-            WholeDocumentSectionState::Dispatched | WholeDocumentSectionState::Failed { .. }
+            WholeDocumentSectionState::Dispatched
+                | WholeDocumentSectionState::Failed { .. }
+                | WholeDocumentSectionState::Saturated { .. }
         )
     }) {
         // Another worker may still own a dispatched request. Do not fail its run
@@ -1083,12 +1342,21 @@ pub(in crate::pipeline::summary) fn run_sections(
             ))
         })?;
     }
-    for index in 0..progress.sections.len() {
+    let mut index = 0;
+    while index
+        < draft
+            .whole_document_progress
+            .as_ref()
+            .unwrap()
+            .sections
+            .len()
+    {
         cancellation_checkpoint(control, PipelineStage::Synthesize).map_err(stage)?;
         if matches!(
             draft.whole_document_progress.as_ref().unwrap().sections[index].state,
-            WholeDocumentSectionState::Completed { .. }
+            WholeDocumentSectionState::Completed { .. } | WholeDocumentSectionState::Split { .. }
         ) {
+            index += 1;
             continue;
         }
         let previous = draft.clone();
@@ -1145,6 +1413,28 @@ pub(in crate::pipeline::summary) fn run_sections(
             Some(&dispatched),
             &draft,
         )?;
+        if matches!(
+            draft.whole_document_progress.as_ref().unwrap().sections[index].state,
+            WholeDocumentSectionState::Saturated { .. }
+        ) {
+            let saturated = draft.clone();
+            input
+                .split_saturated(
+                    draft.whole_document_progress.as_mut().unwrap(),
+                    index,
+                    runtime,
+                    seed,
+                )
+                .map_err(stage)?;
+            db::save_whole_synthesis_progress(
+                conn,
+                &run.run_id,
+                run.state_version,
+                Some(&saturated),
+                &draft,
+            )?;
+        }
+        index += 1;
     }
     cancellation_checkpoint(control, PipelineStage::Synthesize).map_err(stage)?;
     input.finalize_progress(&mut draft).map_err(stage)?;
@@ -1201,6 +1491,7 @@ fn completed_responses(progress: &WholeDocumentProgress) -> Result<Vec<String>, 
     progress
         .sections
         .iter()
+        .filter(|section| !matches!(section.state, WholeDocumentSectionState::Split { .. }))
         .map(|section| match &section.state {
             WholeDocumentSectionState::Completed { response } => Ok(response.text.clone()),
             _ => Err(stage_failure(

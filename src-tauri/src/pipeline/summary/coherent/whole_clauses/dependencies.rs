@@ -10,13 +10,6 @@ pub(in crate::pipeline::summary) struct ExternalSource {
 }
 
 impl ExternalSource {
-    fn named(document: &str) -> Self {
-        Self {
-            document: document.into(),
-            reason: "absent_document",
-            disclosure: "text not in this document",
-        }
-    }
     fn foreign(number: &[String]) -> Self {
         Self {
             document: number.join("."),
@@ -46,6 +39,21 @@ pub(in crate::pipeline::summary) struct Reference {
     #[cfg(test)]
     pub text: String,
     pub status: ReferenceStatus,
+    // Captured at the reader, consumed once by the source-identity resolver.
+    namespace: Option<QualifiedNamespace>,
+}
+
+#[derive(Clone, Debug)]
+enum QualifiedNamespace {
+    ExplicitDocument(String),
+    OpaqueName(String),
+}
+impl QualifiedNamespace {
+    fn name(&self) -> &str {
+        match self {
+            Self::ExplicitDocument(name) | Self::OpaqueName(name) => name,
+        }
+    }
 }
 
 pub(in crate::pipeline::summary) struct DependencyProjection {
@@ -146,27 +154,22 @@ fn initialism(word: &str) -> bool {
         && word.chars().all(|c| c.is_ascii_uppercase() || c == '.')
 }
 
-fn named_document_terminal(word: &str) -> bool {
-    matches!(
-        word.trim_end_matches('.').to_ascii_lowercase().as_str(),
-        "code" | "act" | "statute" | "regulations" | "document" | "agreement" | "contract"
-    )
+// Qualified names are read structurally. No document/law name or abbreviation
+// vocabulary supplies an identity. A bare capitalized name is never scanned.
+fn qualifier_name_part(word: &str) -> bool {
+    word.chars().next().is_some_and(char::is_uppercase)
+        || word.chars().all(|c| c.is_ascii_digit())
+        || matches!(word.to_ascii_lowercase().as_str(), "of" | "the")
 }
 
 fn preposed_qualifier(
     text: &str,
     ts: &[Token<'_>],
     section: usize,
-) -> Option<(usize, ExternalSource)> {
+) -> Option<(usize, Option<QualifiedNamespace>)> {
     let end = section.checked_sub(1)?;
-    if initialism(ts[end].text) && end > 0 && ts[end - 1].text.chars().all(|c| c.is_ascii_digit()) {
-        let start = end - 1;
-        return Some((
-            start,
-            ExternalSource::named(&text[ts[start].start..ts[end].end]),
-        ));
-    }
-    if !named_document_terminal(ts[end].text)
+    if text[ts[end].end..ts[section].start].contains(['\n', ';', ',', '(', ')'])
+        || !qualifier_name_part(ts[end].text)
         || ts[end].text.ends_with('.') && !initialism(ts[end].text)
     {
         return None;
@@ -177,29 +180,63 @@ fn preposed_qualifier(
         if prior.text.eq_ignore_ascii_case("this") {
             return None;
         }
-        if text[prior.end..ts[start].start].contains([';', ',', '(', ')'])
+        if text[prior.end..ts[start].start].contains(['\n', ';', ',', '(', ')'])
             || prior.text.ends_with('.') && !initialism(prior.text)
+            || !qualifier_name_part(prior.text)
         {
-            break;
-        }
-        let name_part = prior.text.chars().next().is_some_and(char::is_uppercase)
-            || prior.text.chars().all(|c| c.is_ascii_digit())
-            || matches!(prior.text.to_ascii_lowercase().as_str(), "of" | "the");
-        if !name_part {
             break;
         }
         start -= 1;
     }
-    (start < end).then(|| {
+    while start < end && matches!(ts[start].text.to_ascii_lowercase().as_str(), "of" | "the") {
+        start += 1;
+    }
+    let numeric_namespace = initialism(ts[end].text)
+        && end > 0
+        && ts[end - 1].text.chars().all(|c| c.is_ascii_digit())
+        && text[ts[end - 1].end..ts[end].start].trim().is_empty();
+    if numeric_namespace {
+        start = end - 1;
+    }
+    let words = &ts[start..=end];
+    let named = words
+        .iter()
+        .filter(|t| !matches!(t.text.to_ascii_lowercase().as_str(), "of" | "the"))
+        .count()
+        >= 2
+        && words.iter().any(|t| t.text.chars().any(char::is_uppercase));
+    let recognized = numeric_namespace
+        || matches!(
+            ts[end]
+                .text
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+                .as_str(),
+            "document" | "agreement" | "contract"
+        );
+    named.then(|| {
         (
             start,
-            ExternalSource::named(&text[ts[start].start..token_end(&ts[end])]),
+            recognized.then(|| {
+                QualifiedNamespace::ExplicitDocument(
+                    text[ts[start].start..if initialism(ts[end].text) {
+                        ts[end].end
+                    } else {
+                        token_end(&ts[end])
+                    }]
+                        .to_owned(),
+                )
+            }),
         )
     })
 }
 
 // Consume the document qualifier once, preserving its bytes even for this document.
-fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<ExternalSource>, bool) {
+fn qualifier(
+    text: &str,
+    ts: &[Token<'_>],
+    end: usize,
+) -> (usize, Option<QualifiedNamespace>, bool) {
     if !ts
         .get(end)
         .is_some_and(|t| t.text.eq_ignore_ascii_case("of"))
@@ -213,10 +250,10 @@ fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<Externa
     {
         cursor += 1;
         let current = ts.get(cursor).is_some_and(|t| {
-            matches!(
-                t.text.trim_end_matches('.').to_ascii_lowercase().as_str(),
-                "agreement" | "contract" | "document"
-            )
+            t.text
+                .trim_end_matches('.')
+                .chars()
+                .all(char::is_alphabetic)
         });
         return ((cursor + 1).min(ts.len()), None, !current);
     }
@@ -227,6 +264,21 @@ fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<Externa
         cursor += 1;
     }
     let begin = cursor;
+    // Explicit numeric namespace: the spelling of the initialism is never looked up.
+    if let (Some(number), Some(namespace)) = (ts.get(begin), ts.get(begin + 1)) {
+        if number.text.chars().all(|c| c.is_ascii_digit())
+            && initialism(namespace.text)
+            && text[number.end..namespace.start].trim().is_empty()
+        {
+            return (
+                begin + 2,
+                Some(QualifiedNamespace::ExplicitDocument(
+                    text[number.start..namespace.end].to_owned(),
+                )),
+                false,
+            );
+        }
+    }
     while let Some(t) = ts.get(cursor) {
         if cursor > begin
             && (text[ts[cursor - 1].end..t.start].contains([';', ',', '(', ')'])
@@ -241,11 +293,7 @@ fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<Externa
             && ts[begin..cursor]
                 .iter()
                 .all(|w| w.text.chars().next().is_some_and(char::is_uppercase));
-        let statute = matches!(
-            word.as_str(),
-            "code" | "act" | "statute" | "regulations" | "u.s.c"
-        ) && cursor > begin;
-        if document || named || statute {
+        if document || named {
             let mut limit = cursor + 1;
             if document {
                 while ts.get(limit).is_some_and(|next| {
@@ -256,7 +304,11 @@ fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<Externa
                 }
             }
             let name = &text[ts[begin].start..token_end(&ts[limit - 1])];
-            return (limit, Some(ExternalSource::named(name)), false);
+            return (
+                limit,
+                Some(QualifiedNamespace::ExplicitDocument(name.to_owned())),
+                false,
+            );
         }
         if !t.text.chars().next().is_some_and(char::is_uppercase)
             && !t.text.chars().all(|c| c.is_ascii_digit())
@@ -266,7 +318,18 @@ fn qualifier(text: &str, ts: &[Token<'_>], end: usize) -> (usize, Option<Externa
         }
         cursor += 1;
     }
-    (cursor.max(end + 1), None, true)
+    let name = (cursor > begin
+        && ts[begin]
+            .text
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase))
+    .then(|| text[ts[begin].start..token_end(&ts[cursor - 1])].to_owned());
+    (
+        cursor.max(end + 1),
+        name.map(QualifiedNamespace::OpaqueName),
+        true,
+    )
 }
 
 fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
@@ -279,28 +342,6 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
             ts[i].text.to_ascii_lowercase().as_str(),
             "sections" | "articles"
         );
-        if ts[i].text == "Prime"
-            && ts
-                .get(i + 1)
-                .is_some_and(|t| t.text.trim_end_matches('.') == "Contract")
-        {
-            i += 2;
-            let raw = &text[ts[start].start..token_end(&ts[i - 1])];
-            result.push((
-                Reference {
-                    span: SourceFragment {
-                        block_id: span.block_id.clone(),
-                        start: span.start + ts[start].start,
-                        end: span.start + token_end(&ts[i - 1]),
-                    },
-                    #[cfg(test)]
-                    text: raw.into(),
-                    status: ReferenceStatus::External(ExternalSource::named(raw)),
-                },
-                vec![],
-            ));
-            continue;
-        }
         let Some(kind) = kind(ts[i].text) else {
             i += 1;
             continue;
@@ -312,8 +353,10 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
             i += 1;
             continue;
         }
-        let preposed = preposed_qualifier(text, &ts, i).map(|(begin, document)| {
+        let mut unresolved_preposed = false;
+        let preposed = preposed_qualifier(text, &ts, i).and_then(|(begin, document)| {
             start = begin;
+            unresolved_preposed = document.is_none();
             document
         });
         i += 1;
@@ -386,7 +429,18 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
             end_byte = token_end(&ts[n]);
             i = n + 1;
         }
-        let (end, external, unclear) = qualifier(text, &ts, i);
+        let (end, namespace, unclear) = qualifier(text, &ts, i);
+        let conflict = preposed
+            .as_ref()
+            .zip(namespace.as_ref())
+            .is_some_and(|(a, b)| a.name() != b.name())
+            || preposed.is_some() && end > i && namespace.is_none()
+            || unresolved_preposed && namespace.is_some();
+        let namespace = if conflict {
+            None
+        } else {
+            namespace.or(preposed)
+        };
         if end > i {
             end_byte = token_end(&ts[end - 1]);
             i = end;
@@ -402,11 +456,11 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
         }
         #[cfg(test)]
         let raw = &text[ts[start].start..end_byte];
-        let status = if let Some(document) = external.or(preposed) {
-            ReferenceStatus::External(document)
+        let status = if matches!(namespace, Some(QualifiedNamespace::ExplicitDocument(_))) {
+            ReferenceStatus::Unresolved("ambiguous_document_qualifier")
         } else if invalid {
             ReferenceStatus::Unresolved("unsupported_form")
-        } else if unclear {
+        } else if namespace.is_some() || unclear || unresolved_preposed || conflict {
             ReferenceStatus::Unresolved("ambiguous_document_qualifier")
         } else {
             ReferenceStatus::Resolved(vec![])
@@ -421,6 +475,7 @@ fn scan(text: &str, span: &SourceFragment) -> Vec<(Reference, Vec<Target>)> {
                 #[cfg(test)]
                 text: raw.into(),
                 status,
+                namespace,
             },
             targets,
         ));
@@ -602,9 +657,50 @@ fn resolve(
     }
 }
 
+fn identity_words(text: &str) -> Vec<String> {
+    tokens(text)
+        .iter()
+        .map(|t| t.text.trim_end_matches('.').to_lowercase())
+        .collect()
+}
+
+fn namespace_is_owned(name: &str, clauses: &[SourceClause], identities: &[SourceIdentity]) -> bool {
+    let identity = identity_words(name);
+    if identity.is_empty() {
+        return true;
+    }
+    clauses.iter().any(|clause| {
+        clause.headings.iter().any(|heading| {
+            identity_words(heading)
+                .windows(identity.len())
+                .any(|words| words == identity)
+        }) || clause
+            .annex
+            .as_ref()
+            .is_some_and(|(kind, label)| identity_words(&format!("{kind} {label}")) == identity)
+    }) || identities.iter().any(|entry| match entry {
+        SourceIdentity::Heading(text) | SourceIdentity::Declared(text) => identity_words(text)
+            .windows(identity.len())
+            .any(|words| words == identity),
+        SourceIdentity::Introduction(text) => {
+            let words = identity_words(text);
+            words.first().is_some_and(|w| w == "this") && words[1..].starts_with(&identity)
+        }
+    })
+}
+
+fn numbered_target_is_owned(target: &Target, clauses: &[SourceClause]) -> bool {
+    match target {
+        Target::Section(number) => clauses.iter().any(|c| c.number.as_ref() == Some(number)),
+        Target::Article(number) => clauses.iter().any(|c| c.article == Some(*number)),
+        // Only the explicitly accepted singular numbered form can gain this status.
+        _ => true,
+    }
+}
+
 impl DependencyProjection {
     pub(in crate::pipeline::summary) fn new(document: &NormalizedDocument) -> Self {
-        let clauses = contract_sources_for_policy(
+        let (clauses, identities) = contract_source_inventory(
             document,
             page_furniture::Policy::RunningMetadata,
             HeadingGrammar::WholeDocument,
@@ -646,7 +742,7 @@ impl DependencyProjection {
             let mut owned = Vec::new();
             for fragment in &clause.fragments {
                 let text = &blocks[fragment.block_id.as_str()].text[fragment.start..fragment.end];
-                for (reference, targets) in scan(text, fragment) {
+                for (mut reference, targets) in scan(text, fragment) {
                     if clause.heading_spans.iter().any(|h| {
                         h.block_id == reference.span.block_id
                             && h.start <= reference.span.start
@@ -657,6 +753,37 @@ impl DependencyProjection {
                             excluded_heading_references += 1;
                         }
                         continue;
+                    }
+                    if matches!(
+                        reference.status,
+                        ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+                    ) {
+                        if let Some(namespace) = &reference.namespace {
+                            let name = namespace.name();
+                            let admissible = match namespace {
+                                QualifiedNamespace::ExplicitDocument(_) => true,
+                                QualifiedNamespace::OpaqueName(_) => {
+                                    targets.len() == 1
+                                        && targets.first().is_some_and(|target| {
+                                            !numbered_target_is_owned(target, &clauses)
+                                        })
+                                }
+                            };
+                            if admissible && !namespace_is_owned(name, &clauses, &identities) {
+                                reference.status = ReferenceStatus::External(ExternalSource {
+                                    document: name.to_owned(),
+                                    reason: match namespace {
+                                        QualifiedNamespace::ExplicitDocument(_) => {
+                                            "absent_document"
+                                        }
+                                        QualifiedNamespace::OpaqueName(_) => {
+                                            "unowned_named_document"
+                                        }
+                                    },
+                                    disclosure: "text not in this document",
+                                });
+                            }
+                        }
                     }
                     if matches!(reference.status, ReferenceStatus::Resolved(_)) {
                         // Each list member owns a status. A foreign member must not

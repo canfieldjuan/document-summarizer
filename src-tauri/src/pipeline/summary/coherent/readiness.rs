@@ -382,7 +382,9 @@ fn whole_document_dependencies_status_boundaries_and_external() {
         "3. Local\nExterior work is excluded.".into(),
     ]);
     let p = DependencyProjection::new(&normalized);
-    assert_eq!(p.references[0].len(), 2);
+    // Only the explicit numbered qualifier is a dependency. The bare name
+    // remains source text; it cannot establish an absent document.
+    assert_eq!(p.references[0].len(), 1);
     assert!(p.references[0]
         .iter()
         .all(|r| matches!(r.status, ReferenceStatus::External(_))));
@@ -955,18 +957,19 @@ fn dependency_repair_qualified_statute_is_external_not_same_number_local() {
             "105. Local Conditions\nExterior work is excluded.".into(),
         ]);
         let p = whole_clauses::DependencyProjection::new(&normalized);
-        assert!(
-            p.blocking_reasons(0).is_empty(),
-            "{reference}: {:?}",
-            p.blocking_reasons(0)
-        );
-        assert!(
-            matches!(
+        if reference.contains("United States Code") {
+            assert_eq!(p.blocking_reasons(0), vec!["ambiguous_document_qualifier"]);
+            assert!(matches!(
+                p.references[0][0].status,
+                whole_clauses::ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+            ));
+        } else {
+            assert!(p.blocking_reasons(0).is_empty());
+            assert!(matches!(
                 p.references[0][0].status,
                 whole_clauses::ReferenceStatus::External(_)
-            ),
-            "{reference}"
-        );
+            ));
+        }
         assert!(!p
             .context(0, &normalized)
             .contains("Exterior work is excluded."));
@@ -1135,23 +1138,25 @@ fn dependency_repair_compact_section_symbol_is_not_skipped() {
 
 #[test]
 fn dependency_namespace_repair_abbreviation_and_real_sentence_end_twins() {
-    for reference in [
-        "Section 501 of the U.S. Code",
-        "Section 501(c)(3) of the U.S. Internal Revenue Code",
+    for (reference, reason) in [
+        (
+            "Section 501 of the U.S. Code",
+            "ambiguous_document_qualifier",
+        ),
+        (
+            "Section 501(c)(3) of the U.S. Internal Revenue Code",
+            "unsupported_form",
+        ),
     ] {
         let normalized = public_document(&[
             format!("1. Permission\nPermission follows {reference}."),
             "501. Local Rule\nExterior work is excluded.".into(),
         ]);
         let p = whole_clauses::DependencyProjection::new(&normalized);
-        assert!(
-            p.blocking_reasons(0).is_empty(),
-            "{reference}: {:?}",
-            p.blocking_reasons(0)
-        );
+        assert_eq!(p.blocking_reasons(0), vec![reason]);
         assert!(matches!(
             p.references[0][0].status,
-            whole_clauses::ReferenceStatus::External(_)
+            whole_clauses::ReferenceStatus::Unresolved(actual) if actual == reason
         ));
         assert_eq!(p.references[0][0].text, reference);
         assert!(!p
@@ -1185,15 +1190,19 @@ fn dependency_namespace_repair_preposed_code_and_owned_range_twins() {
             "301.1 Second\nRoof work is excluded.".into(),
         ]);
         let p = whole_clauses::DependencyProjection::new(&normalized);
-        assert!(
-            p.blocking_reasons(0).is_empty(),
-            "{reference}: {:?}",
-            p.blocking_reasons(0)
-        );
-        assert!(matches!(
-            p.references[0][0].status,
-            whole_clauses::ReferenceStatus::External(_)
-        ));
+        if reference.starts_with("Example State Code") {
+            assert_eq!(p.blocking_reasons(0), vec!["ambiguous_document_qualifier"]);
+            assert!(matches!(
+                p.references[0][0].status,
+                whole_clauses::ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+            ));
+        } else {
+            assert!(p.blocking_reasons(0).is_empty());
+            assert!(matches!(
+                p.references[0][0].status,
+                whole_clauses::ReferenceStatus::External(_)
+            ));
+        }
         assert!(!p.context(0, &normalized).contains("Roof work is excluded."));
     }
     let normalized = public_document(&[
@@ -1947,10 +1956,37 @@ fn whole_writer_offline_native_capacity_measurement() {
     ));
     let output =
         std::path::PathBuf::from(std::env::var_os("DOC_SUM_WRITER_CAPACITY_OUTPUT").unwrap());
+    let diagnose_only =
+        std::env::var("DOC_SUM_WRITER_RESERVATION_DIAGNOSTIC").as_deref() == Ok("1");
     let mut rows = Vec::new();
     for (alias, normalized, require_sections) in inputs {
         let chunked = whole_writer_chunks(&normalized);
-        let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+        let input = match whole_document::SourceInput::new(&normalized, &chunked) {
+            Ok(input) => input,
+            Err(error) if diagnose_only => {
+                rows.push(
+                    json!({"alias":alias,"status":"source_blocked","failure":error,
+                    "reservation_measurement":"unavailable; source gate retained"}),
+                );
+                continue;
+            }
+            Err(error) => panic!("source input failed: {error:?}"),
+        };
+        if diagnose_only {
+            let units = (0..input.units.len())
+                .map(|index| {
+                    let request = input.diagnostic_unit_request(index).unwrap();
+                    let mut row = budget::diagnose_reservation(&runtime, &request).unwrap();
+                    row["input_tokens"] = json!(runtime.input_tokens(&request));
+                    row["unit_id"] = json!(input.units[index].id);
+                    row
+                })
+                .collect::<Vec<_>>();
+            rows.push(
+                json!({"alias":alias,"status":"read_only_reservation_diagnostics","units":units}),
+            );
+            continue;
+        }
         let before = runtime.preflight_count();
         let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION);
         let row = match plan {
@@ -1968,9 +2004,11 @@ fn whole_writer_offline_native_capacity_measurement() {
                 );
                 let drafts=plan.drafts.iter().map(|draft| {
                     runtime.preflight_request(&draft.request).unwrap();
+                    assert_eq!(budget::maximum_characters(&draft.request).unwrap(), MAX_UNIT_CHARACTERS,
+                        "admitted writer sections must retain the full claim allowance");
                     let ModelOutputFormat::JsonSchema {name,schema}=&draft.request.output_format else {panic!("writer schema required");};
                     json!({"primary":draft.primary,"request":{"stage":draft.request.stage,"ordinal":draft.request.ordinal,"seed":draft.request.seed,"system_prompt":draft.request.system_prompt,"user_prompt":draft.request.user_prompt,"output_format":{"name":name,"schema":schema},"max_output_tokens":draft.request.max_output_tokens},
-                        "input_tokens":runtime.input_tokens(&draft.request),"citation_count":draft.catalog.candidates.len(),"schema_bytes":serde_json::to_vec(schema).unwrap().len(),"maximum_unit_characters":budget::maximum_characters(&draft.request).unwrap()})
+                        "input_tokens":runtime.input_tokens(&draft.request),"output_allowance_tokens":draft.request.max_output_tokens,"maximum_units":schema["properties"]["units"]["maxItems"],"citation_count":draft.catalog.candidates.len(),"schema_bytes":serde_json::to_vec(schema).unwrap().len(),"maximum_unit_characters":budget::maximum_characters(&draft.request).unwrap()})
                 }).collect::<Vec<_>>();
                 json!({"alias":alias,"status":"drafts_admitted","requires_consolidation":plan.requires_consolidation,"drafts":drafts})
             }
@@ -1986,6 +2024,16 @@ fn whole_writer_offline_native_capacity_measurement() {
             save_capacity_report(&output, &inventory_hash, &rows, "STOP");
             panic!("offline whole-writer capacity STOP; see private report; no generation");
         }
+    }
+    if diagnose_only {
+        save_capacity_report(
+            &output,
+            &inventory_hash,
+            &rows,
+            "diagnostic_only_not_admission",
+        );
+        println!("RESERVATION_DIAGNOSTICS_SAVED; unchanged source gate; generation_calls=0 runtime_startups=0");
+        return;
     }
     save_capacity_report(&output, &inventory_hash, &rows, "draft_planning_only");
     println!("OFFLINE_WRITER_CAPACITY_SAVED; draft admission only, consolidation/persistence/fidelity not proven; generation_calls=0 runtime_startups=0");
@@ -2425,11 +2473,121 @@ fn whole_writer_assembly_replays_the_frozen_public_candidate_packet() {
         drafts,
         requires_consolidation: true,
     };
-    let assembly = input.assemble(&plan, &responses, 7).unwrap();
+    // Keep the original artifact as evidence of the rejected 39/282-character
+    // request shape. Reuse its exact authored text/IDs under a newly admitted
+    // plan; this is request repair, never new generation or rewritten claims.
+    assert_eq!(
+        input.assemble(&plan, &responses, 7).unwrap_err().code,
+        "WHOLE_DOCUMENT_SOURCE_INVALID"
+    );
+    let authored = responses
+        .iter()
+        .flat_map(|response| {
+            serde_json::from_str::<Value>(response).unwrap()["units"]
+                .as_array()
+                .unwrap()
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authored.len(), 40);
+    let runtime =
+        crate::pipeline::llama_cpp::framing_tests::OfflineNativeCountRuntime::from_frozen_inventory(
+            &std::path::PathBuf::from(std::env::var_os("DOC_SUM_OFFLINE_COUNT_INVENTORY").unwrap()),
+            &std::env::var("DOC_SUM_OFFLINE_COUNT_INVENTORY_SHA256").unwrap(),
+        );
+    let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut progress = input.new_progress(&plan, &runtime, 7).unwrap();
+    let mut section = 0;
+    while section < progress.sections.len() {
+        let request = input
+            .dispatch_section(&mut progress, section, &runtime, 7)
+            .unwrap();
+        let primary = progress.sections[section].primary.clone();
+        assert_eq!(
+            budget::maximum_characters(&request).unwrap(),
+            MAX_UNIT_CHARACTERS
+        );
+        let units = authored
+            .iter()
+            .filter(|unit| {
+                assert_eq!(
+                    unit["source_ids"].as_array().unwrap().len(),
+                    1,
+                    "the pinned authored size fixture uses one source per claim"
+                );
+                let source = unit["source_ids"][0].as_str().unwrap();
+                let (anchor, _) = input
+                    .anchors
+                    .iter()
+                    .zip(&input.catalog.candidates)
+                    .find(|(_, candidate)| candidate.request_id == source)
+                    .unwrap();
+                primary.contains(&anchor.unit)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!units.is_empty());
+        let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+            panic!("schema")
+        };
+        let limit = schema["properties"]["units"]["maxItems"].as_u64().unwrap() as usize;
+        // Authored size-control simulation only, never a new model result:
+        // a full response drives the real split owner. No parent prefix is
+        // delivered; all original authored claims must survive in leaf output.
+        let text = json!({"units":units.into_iter().take(limit).collect::<Vec<_>>()}).to_string();
+        input
+            .record_section(
+                &mut progress,
+                section,
+                &ModelResponse {
+                    text,
+                    runtime_id: runtime.runtime_id().into(),
+                    model_id: runtime.model_id().into(),
+                    request_attempts: vec![],
+                },
+            )
+            .unwrap();
+        if matches!(
+            progress.sections[section].state,
+            crate::pipeline::contracts::WholeDocumentSectionState::Saturated { .. }
+        ) {
+            input
+                .split_saturated(&mut progress, section, &runtime, 7)
+                .unwrap();
+        }
+        section += 1;
+    }
+    let plan = input.restore_progress(&progress).unwrap();
+    let assembly = input.finish_progress(&mut progress).unwrap();
+    for (claim, original) in assembly.claims.iter().zip(&authored) {
+        assert_eq!(claim.text, original["text"].as_str().unwrap());
+        let expected = original["source_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                input
+                    .catalog
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.request_id == id.as_str().unwrap())
+                    .unwrap()
+                    .evidence
+                    .evidence_id
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(claim.evidence_ids, expected);
+    }
     assert_eq!(assembly.claims.len(), 40);
     assert_eq!(assembly.lineage.len(), 40);
     for ((section, candidate, target), claim) in assembly.lineage.iter().zip(&assembly.claims) {
-        let raw: Value = serde_json::from_str(&responses[*section]).unwrap();
+        let crate::pipeline::contracts::WholeDocumentSectionState::Completed { response } =
+            &progress.sections[*section].state
+        else {
+            panic!("lineage cannot borrow discarded saturation output")
+        };
+        let raw: Value = serde_json::from_str(&response.text).unwrap();
         assert_eq!(
             claim.text,
             raw["units"][*candidate]["text"].as_str().unwrap()
@@ -2443,7 +2601,7 @@ fn whole_writer_assembly_replays_the_frozen_public_candidate_packet() {
     use std::io::Write;
     let output =
         std::path::PathBuf::from(std::env::var_os("DOC_SUM_ASSEMBLY_REPLAY_OUTPUT").unwrap());
-    let result = json!({"kind":"frozen authored public packet replay, not model output or fidelity qualification","public_freeze_sha256":format!("{:x}",Sha256::digest(&bytes)),"assembly":assembly,"draft_count":plan.drafts.len(),"live_model_calls":0,"runtime_startups":0});
+    let result = json!({"kind":"frozen authored public packet replay with authored saturation controls, not model output or fidelity qualification","public_freeze_sha256":format!("{:x}",Sha256::digest(&bytes)),"assembly":assembly,"draft_count":plan.drafts.len(),"retained_section_attempts":progress.sections.len(),"original_request_shape_rejected":true,"exact_authored_text_and_citations_preserved":true,"live_model_calls":0,"runtime_startups":0});
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -2920,6 +3078,7 @@ struct WholeWriterStageRuntime {
     generation_requests: std::sync::Mutex<Vec<ModelRequest>>,
     fail_ordinal: Option<u32>,
     schema_limit: Option<usize>,
+    saturate_first: std::sync::atomic::AtomicBool,
 }
 impl WholeWriterStageRuntime {
     fn new() -> Self {
@@ -2930,6 +3089,7 @@ impl WholeWriterStageRuntime {
             generation_requests: std::sync::Mutex::new(vec![]),
             fail_ordinal: None,
             schema_limit: None,
+            saturate_first: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -3002,11 +3162,15 @@ impl ModelRuntime for WholeWriterStageRuntime {
                 "invalid public response".into()
             } else {
                 let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
-                let units = prompt["units"].as_array().unwrap().iter().filter(|u|u["primary"]==true).map(|u| {
+                let mut units = prompt["units"].as_array().unwrap().iter().filter(|u|u["primary"]==true).map(|u| {
                     let index = u["index"].as_u64().unwrap();
                     let source = prompt["sources"].as_array().unwrap().iter().find(|s|s[4]==index).unwrap();
                     json!({"text":format!("Operator records inspection {}.",index+1), "source_ids":[source[0]]})
                 }).collect::<Vec<_>>();
+                if self.saturate_first.swap(false, Ordering::SeqCst) {
+                    let limit = prompt["maximum_units"].as_u64().unwrap();
+                    units=(0..limit).map(|n|json!({"text":format!("Saturated inspection proposition {n}."),"source_ids":[prompt["sources"][0][0]]})).collect();
+                }
                 json!({"units":units}).to_string()
             }
         } else {
@@ -3025,7 +3189,6 @@ fn whole_writer_stage_fixture(
     path: &Path,
     runtime: &WholeWriterStageRuntime,
 ) -> (Connection, String, NormalizedDocument, ChunkedDocument) {
-    use crate::pipeline::{contracts::PipelineState, ingest::prepare_pdf_ingestion};
     let texts = (1..=4)
         .map(|n| {
             format!(
@@ -3034,7 +3197,16 @@ fn whole_writer_stage_fixture(
             )
         })
         .collect::<Vec<_>>();
-    let normalized = public_document(&texts);
+    whole_writer_stage_fixture_from_texts(path, runtime, &texts)
+}
+
+fn whole_writer_stage_fixture_from_texts(
+    path: &Path,
+    runtime: &WholeWriterStageRuntime,
+    texts: &[String],
+) -> (Connection, String, NormalizedDocument, ChunkedDocument) {
+    use crate::pipeline::{contracts::PipelineState, ingest::prepare_pdf_ingestion};
+    let normalized = public_document(texts);
     let chunked = whole_writer_chunks(&normalized);
     let analyzed = analyze(runtime, &chunked, &normalized, 7, &UNCONTROLLED_EXECUTION).unwrap();
     let mut conn = db::init_db(path).unwrap();
@@ -3298,4 +3470,776 @@ fn whole_writer_all_held_fails_completion_and_preserves_the_verification_attempt
         db::get_pipeline_run(&conn, &run).unwrap().unwrap().state,
         crate::pipeline::contracts::PipelineState::Failed
     );
+}
+
+#[test]
+fn review132_bare_document_names_are_not_invented_dependencies() {
+    use whole_clauses::DependencyProjection;
+    for text in [
+        "Section 1 Terms\nThe Prime Contract is included below.",
+        "Section 1 Terms\nPrime Contract is the name of this document.",
+    ] {
+        let normalized = public_document(&[text.into()]);
+        let projection = DependencyProjection::new(&normalized);
+        assert!(
+            projection.references.iter().all(Vec::is_empty),
+            "bare names cannot establish an absent document"
+        );
+    }
+}
+
+#[test]
+fn review132_unresolved_dependencies_block_the_writer_consumer() {
+    use whole_clauses::DependencyProjection;
+    for (reference, extra, reason) in [
+        ("Section 9.4", None, "missing_target"),
+        ("subsection (b)", None, "unsupported_form"),
+        (
+            "Section 1.2",
+            Some("Section 1.2 Duplicate\nA second rule applies."),
+            "duplicate_target",
+        ),
+    ] {
+        let mut texts = vec![
+            format!("Section 1.1 Duty\nThe operator follows {reference}."),
+            "Section 1.2 Rule\nThe operator must inspect.".into(),
+        ];
+        if let Some(extra) = extra {
+            texts.push(extra.into());
+        }
+        let normalized = public_document(&texts);
+        let projection = DependencyProjection::new(&normalized);
+        assert!(projection.blocking_reasons(0).contains(&reason));
+        let chunked = whole_writer_chunks(&normalized);
+        let failure = match whole_document::SourceInput::new(&normalized, &chunked) {
+            Ok(_) => panic!("unresolved {reason} reached the writer planner"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "WHOLE_DOCUMENT_DEPENDENCY_UNRESOLVED");
+        assert!(failure.message.contains(reason));
+    }
+}
+
+#[test]
+fn review132_identical_claim_text_keeps_distinct_source_owners() {
+    let normalized = public_document(
+        &(1..=4)
+            .map(|n| {
+                format!(
+                    "Section {n} Inspections\n{}",
+                    "The operator must inspect the equipment. ".repeat(50)
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let chunked = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    let plan = input
+        .plan(
+            &WriterProjectionRuntime::new(7_500),
+            7,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+    assert!(plan.drafts.len() > 1);
+    let responses = plan.drafts.iter().map(|draft| {
+        let unit = draft.primary[0];
+        let (_, source) = input.anchors.iter().zip(&input.catalog.candidates)
+            .find(|(anchor, _)|anchor.unit == unit).unwrap();
+        json!({"units":[{"text":"The operator must inspect the equipment.","source_ids":[source.request_id]}]}).to_string()
+    }).collect::<Vec<_>>();
+    let assembled = input.assemble(&plan, &responses, 7).unwrap();
+    assert_eq!(
+        assembled.claims.len(),
+        responses.len(),
+        "identical wording with different source ownership is not a duplicate"
+    );
+    assert_eq!(
+        assembled
+            .claims
+            .iter()
+            .map(|c| &c.evidence_ids)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        responses.len()
+    );
+    assert_eq!(
+        assembled
+            .lineage
+            .iter()
+            .map(|(_, _, target)| *target)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        responses.len()
+    );
+}
+
+#[test]
+fn review132_sections_keep_full_claim_character_allowance() {
+    struct TokenBudget;
+    impl ModelRuntime for TokenBudget {
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("offline planner must not generate")
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            panic!("offline planner must not start a runtime")
+        }
+        fn runtime_id(&self) -> &str {
+            "public-token-boundary"
+        }
+        fn model_id(&self) -> &str {
+            "public-token-boundary"
+        }
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            32_768
+        }
+        fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if request.user_prompt.len() / 4 + request.max_output_tokens as usize > 24_000 {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "public joint input/output boundary".into(),
+                    recoverable: false,
+                    request_attempts: vec![],
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let normalized = public_document(
+        &(1..=4)
+            .map(|n| {
+                format!(
+                    "Section {n} Inspections\n{}",
+                    "The operator must inspect the equipment. ".repeat(50)
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let chunked = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    let plan = input
+        .plan(&TokenBudget, 7, &UNCONTROLLED_EXECUTION)
+        .unwrap();
+    for draft in &plan.drafts {
+        assert_eq!(
+            budget::maximum_characters(&draft.request).unwrap(),
+            MAX_UNIT_CHARACTERS,
+            "section packing must split rather than shrink the claim schema"
+        );
+    }
+    assert_eq!(
+        plan.drafts.len(),
+        1,
+        "unused answer reservation must not force extra sections"
+    );
+    let indivisible = public_document(&[format!(
+        "Section 1 Inspections\n{}",
+        "The operator must inspect the equipment. ".repeat(4_000)
+    )]);
+    let chunks = whole_writer_chunks(&indivisible);
+    let source = whole_document::SourceInput::new(&indivisible, &chunks).unwrap();
+    assert_eq!(
+        source
+            .plan(&TokenBudget, 7, &UNCONTROLLED_EXECUTION)
+            .unwrap_err()
+            .code,
+        "WHOLE_DOCUMENT_UNIT_TOO_LARGE",
+        "an indivisible source must hold instead of shrinking claims"
+    );
+}
+
+#[test]
+fn review132_external_source_disclosures_reach_delivered_output_and_reload() {
+    let runtime = WholeWriterStageRuntime::new();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("external-coverage.sqlite");
+    let texts = vec!["Section 1 Inspections
+The operator records inspection number 1. Equipment follows Schedule Z and Section 91 of the Lunar Port Standard.".into()];
+    let (mut conn, run, _, _) = whole_writer_stage_fixture_from_texts(&path, &runtime, &texts);
+    synthesize_analyzed_document_for_policy(
+        &mut conn,
+        &runtime,
+        &run,
+        &UNCONTROLLED_EXECUTION,
+        None,
+        WHOLE_DOCUMENT_VERSION,
+    )
+    .unwrap();
+    verify_synthesized_document_controlled(&mut conn, &runtime, &run, &UNCONTROLLED_EXECUTION)
+        .unwrap();
+    complete_verified_document(&mut conn, &run).unwrap();
+    let view = crate::pipeline::workspace::get_persisted_summary(&conn, &run).unwrap();
+    for disclosure in [
+        "attachment not included in this document",
+        "text not in this document",
+    ] {
+        assert!(
+            view.summary
+                .warnings
+                .iter()
+                .any(|w| w.message.contains(disclosure)),
+            "external source coverage notice is missing from delivered output: {disclosure}"
+        );
+    }
+    drop(conn);
+    let conn = db::init_db(&path).unwrap();
+    assert_eq!(
+        crate::pipeline::workspace::get_persisted_summary(&conn, &run).unwrap(),
+        view
+    );
+    let mut draft = db::get_synthesized_document(&conn, &run).unwrap().unwrap();
+    let normalized = db::get_normalized_document(&conn, &run).unwrap().unwrap();
+    let chunked = db::get_chunked_document(&conn, &run).unwrap().unwrap();
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    let position = draft
+        .warnings
+        .iter()
+        .position(|w| w.message.contains("text not in this document"))
+        .unwrap();
+    draft.warnings.remove(position);
+    assert!(
+        input.validate_saved_synthesis(&draft).is_err(),
+        "a dropped source coverage disclosure must fail saved validation"
+    );
+}
+
+#[test]
+fn review132_named_qualifiers_use_syntax_not_document_vocabulary() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for reference in [
+        "Section 7 of the Purple Reference Document",
+        "Purple Reference Document Section 7",
+    ] {
+        let normalized = public_document(&[
+            format!("Section 1 Scope\nEquipment follows {reference}."),
+            "Section 7 Local\nThe unrelated local rule applies.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        assert!(projection.blocking_reasons(0).is_empty());
+        assert!(matches!(
+            projection.references[0][0].status,
+            ReferenceStatus::External(_)
+        ));
+        assert_eq!(projection.references[0][0].text, reference);
+        assert!(!projection
+            .context(0, &normalized)
+            .contains("unrelated local rule"));
+    }
+    let normalized = public_document(&[
+        "Section 1 Scope\nEquipment follows Section 7 of this Lease.".into(),
+        "Section 7 Local\nThe local rule applies.".into(),
+    ]);
+    let projection = DependencyProjection::new(&normalized);
+    assert!(matches!(
+        projection.references[0][0].status,
+        ReferenceStatus::Resolved(_)
+    ));
+}
+
+#[test]
+fn review132_preposed_names_preserve_namespace_boundaries() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for (reference, name) in [
+        ("of 42 XYZ Section 7", "42 XYZ"),
+        ("17 X.Y.Z. Section 7", "17 X.Y.Z."),
+    ] {
+        let normalized = public_document(&[
+            format!("Section 1 Scope\nEquipment follows requirements {reference}."),
+            "Section 7 Local\nThe unrelated local rule applies.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        let ReferenceStatus::External(detail) = &projection.references[0][0].status else {
+            panic!("explicit namespace missing")
+        };
+        assert_eq!(
+            detail.document, name,
+            "connectors/abbreviation punctuation changed namespace identity"
+        );
+    }
+    let normalized = public_document(&[
+        "Section 1 Scope\nForeign Reference Manual, Section 7 applies.".into(),
+        "Section 7 Local\nThe local rule applies.".into(),
+    ]);
+    let projection = DependencyProjection::new(&normalized);
+    assert!(
+        matches!(
+            projection.references[0][0].status,
+            ReferenceStatus::Resolved(_)
+        ),
+        "a name across a comma is not an explicit namespace binding"
+    );
+}
+
+#[test]
+fn review132_capitalized_titles_do_not_prove_external_document_identity() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    for reference in ["Payment Terms Section 7", "Section 7 of the Payment Terms"] {
+        let normalized = public_document(&[
+            format!("Section 1 Scope\nEquipment follows {reference}."),
+            "Section 7 Payment Terms\nThe operator must obtain written permission.".into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        assert!(
+            matches!(
+                projection.references[0][0].status,
+                ReferenceStatus::Unresolved("ambiguous_document_qualifier")
+            ),
+            "capitalization does not establish an absent document namespace"
+        );
+        let chunked = whole_writer_chunks(&normalized);
+        assert!(whole_document::SourceInput::new(&normalized, &chunked).is_err());
+    }
+}
+
+#[test]
+fn baseline_repair_unowned_explicit_namespace_is_external_but_partial_ownership_blocks() {
+    use whole_clauses::{DependencyProjection, ReferenceStatus};
+    let cases = [
+        (
+            "Section 91 of the Lunar Port Standard",
+            "Section 7 Local\nWritten permission is required.",
+            true,
+        ),
+        (
+            "Article IX of the Lunar Port Standard",
+            "ARTICLE II LOCAL\nWritten permission is required.",
+            true,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "Section 7 Lunar Port Standard\nWritten permission is required.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "Schedule A Lunar Port Standard\nWritten permission is required.",
+            false,
+        ),
+        (
+            "Section 7 of the Lunar Port Standard",
+            "Section 7 Local\nWritten permission is required.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "LUNAR PORT STANDARD\nThis document governs the operator.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Agreement",
+            "Section 7 Lunar Port Agreement\nWritten permission is required.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "The name of this agreement is “Lunar Port Standard”.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "This agreement is called “Lunar Port Standard”.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "This Lunar Port Standard governs the operator.",
+            false,
+        ),
+        (
+            "Section 91 of the Lunar Port Standard",
+            "This agreement incorporates the separate Lunar Port Standard.",
+            true,
+        ),
+    ];
+    for (reference, owner, external) in cases {
+        let heading = if reference.starts_with("Article") {
+            "ARTICLE I SCOPE"
+        } else {
+            "Section 1 Scope"
+        };
+        let normalized = public_document(&[
+            format!("{heading}\nEquipment follows {reference}."),
+            owner.into(),
+        ]);
+        let projection = DependencyProjection::new(&normalized);
+        let status = &projection.references[0][0].status;
+        assert_eq!(
+            matches!(status, ReferenceStatus::External(_)),
+            external,
+            "reference={reference} owner={owner} status={status:?}"
+        );
+        if external {
+            let ReferenceStatus::External(detail) = status else {
+                unreachable!()
+            };
+            assert_eq!(detail.document, "Lunar Port Standard");
+            assert_eq!(detail.reason, "unowned_named_document");
+            assert_eq!(detail.disclosure, "text not in this document");
+            let chunked = whole_writer_chunks(&normalized);
+            if let Err(error) = whole_document::SourceInput::new(&normalized, &chunked) {
+                panic!("reference={reference} owner={owner} constructor={error:?}");
+            }
+        } else {
+            assert!(!projection.blocking_reasons(0).is_empty());
+        }
+    }
+}
+
+#[test]
+fn baseline_repair_section_reserves_only_the_claims_that_fit() {
+    struct LimitedOutput;
+    impl ModelRuntime for LimitedOutput {
+        fn generate(&self, _: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            panic!("offline")
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            panic!("offline")
+        }
+        fn runtime_id(&self) -> &str {
+            "bounded-output"
+        }
+        fn model_id(&self) -> &str {
+            "bounded-output"
+        }
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            32_768
+        }
+        fn preflight_request(&self, r: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            if r.user_prompt.len() / 4 + r.max_output_tokens as usize > 12_000 {
+                Err(ModelRuntimeFailure {
+                    code: "MODEL_CONTEXT_EXCEEDED".into(),
+                    message: "joint token budget".into(),
+                    recoverable: false,
+                    request_attempts: vec![],
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let normalized =
+        public_document(&["Section 1 Inspection\nThe operator must inspect the equipment.".into()]);
+    let chunks = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunks).unwrap();
+    let plan = input
+        .plan(&LimitedOutput, 7, &UNCONTROLLED_EXECUTION)
+        .expect("unused document-wide answer reservation must not reject a complete source unit");
+    assert_eq!(plan.drafts.len(), 1);
+    let request = &plan.drafts[0].request;
+    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+        panic!("schema")
+    };
+    let count = schema["properties"]["units"]["maxItems"].as_u64().unwrap();
+    assert!(count > 0 && count < MAX_VERIFICATION_BATCHES as u64);
+    assert_eq!(
+        budget::maximum_characters(request).unwrap(),
+        MAX_UNIT_CHARACTERS
+    );
+    let payload: Value = serde_json::from_str(&request.user_prompt).unwrap();
+    assert_eq!(payload["maximum_units"], json!(count));
+    LimitedOutput.preflight_request(request).unwrap();
+}
+
+#[test]
+fn baseline_repair_saturated_section_never_completes_silently() {
+    use crate::pipeline::contracts::WholeDocumentSectionState;
+    let normalized =
+        public_document(&["Section 1 Inspection\nThe operator inspects the equipment.".into()]);
+    let chunks = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunks).unwrap();
+    let runtime = WriterProjectionRuntime::new(usize::MAX);
+    let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut progress = input.new_progress(&plan, &runtime, 7).unwrap();
+    let request = input
+        .dispatch_section(&mut progress, 0, &runtime, 7)
+        .unwrap();
+    let ModelOutputFormat::JsonSchema { schema, .. } = &request.output_format else {
+        panic!("schema")
+    };
+    let limit = schema["properties"]["units"]["maxItems"].as_u64().unwrap() as usize;
+    let text=json!({"units":(0..limit).map(|n|json!({"text":format!("The operator records inspection number {n}."),"source_ids":["s1"]})).collect::<Vec<_>>()}).to_string();
+    input
+        .record_section(
+            &mut progress,
+            0,
+            &ModelResponse {
+                text,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                request_attempts: vec![],
+            },
+        )
+        .unwrap();
+    assert!(
+        !matches!(
+            progress.sections[0].state,
+            WholeDocumentSectionState::Completed { .. }
+        ),
+        "filling the schema allowance cannot certify complete source coverage"
+    );
+    assert!(input.finish_progress(&mut progress).is_err());
+    assert_eq!(
+        input
+            .split_saturated(&mut progress, 0, &runtime, 7)
+            .unwrap_err()
+            .code,
+        "WHOLE_DOCUMENT_SECTION_SATURATED"
+    );
+    assert!(matches!(
+        progress.sections[0].state,
+        WholeDocumentSectionState::Saturated { .. }
+    ));
+}
+
+#[test]
+fn baseline_repair_saturated_parent_splits_durably_without_redo_or_lost_sources() {
+    use crate::pipeline::contracts::WholeDocumentSectionState;
+    let mut runtime = WholeWriterStageRuntime::new();
+    runtime.admission = WriterProjectionRuntime::new(usize::MAX);
+    runtime.saturate_first.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("split.sqlite");
+    let (mut conn, run, normalized, chunked) = whole_writer_stage_fixture(&path, &runtime);
+    synthesize_analyzed_document_for_policy(
+        &mut conn,
+        &runtime,
+        &run,
+        &UNCONTROLLED_EXECUTION,
+        None,
+        WHOLE_DOCUMENT_VERSION,
+    )
+    .unwrap();
+    let draft = db::get_synthesized_document(&conn, &run).unwrap().unwrap();
+    let progress = draft.whole_document_progress.as_ref().unwrap();
+    assert_eq!(progress.sections.len(), 3);
+    let WholeDocumentSectionState::Split { response } = &progress.sections[0].state else {
+        panic!("parent must remain sealed history")
+    };
+    assert_eq!(
+        format!("{:x}", Sha256::digest(response.text.as_bytes())),
+        response.response_sha256
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&response.text).unwrap()["units"]
+            .as_array()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(draft.summary_claims.len(), 4);
+    assert_eq!(progress.assembly_lineage.as_ref().unwrap().len(), 4);
+    assert!(progress
+        .assembly_lineage
+        .as_ref()
+        .unwrap()
+        .iter()
+        .all(|(section, _, _)| *section > 0));
+    assert_eq!(
+        runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let ModelOutputFormat::JsonSchema { schema, .. } = &r.output_format else {
+                    panic!("schema")
+                };
+                schema["properties"]["units"]["maxItems"].as_u64().unwrap()
+            })
+            .collect::<Vec<_>>(),
+        vec![64, 64, 62],
+        "only accepted distinct claims consume the final document allowance"
+    );
+    assert!(progress.sections[1..]
+        .iter()
+        .all(|s| s.primary.len() < progress.sections[0].primary.len()));
+    drop(conn);
+    let reopened = db::init_db(&path).unwrap();
+    let restored = db::get_synthesized_document(&reopened, &run)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored, draft);
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    input.validate_saved_synthesis(&restored).unwrap();
+    for change in 0..3 {
+        let mut forged = restored.clone();
+        let p = forged.whole_document_progress.as_mut().unwrap();
+        match change {
+            0 => {
+                p.sections[0].state = WholeDocumentSectionState::Completed {
+                    response: response.clone(),
+                }
+            }
+            1 => p.sections[1].primary.clear(),
+            _ => p.sections[0].state = WholeDocumentSectionState::Pending,
+        }
+        assert!(input.validate_saved_synthesis(&forged).is_err());
+    }
+}
+
+#[test]
+fn baseline_repair_split_transition_is_atomic_and_cannot_reset_parent() {
+    use crate::pipeline::contracts::{PipelineState, WholeDocumentSectionState};
+    use crate::pipeline::ingest::prepare_pdf_ingestion;
+    let normalized = public_document(&[
+        "Section 1 Scope\nThe operator inspects equipment.".into(),
+        "Section 2 Records\nThe operator retains records.".into(),
+    ]);
+    let chunks = whole_writer_chunks(&normalized);
+    let input = whole_document::SourceInput::new(&normalized, &chunks).unwrap();
+    let runtime = WriterProjectionRuntime::new(usize::MAX);
+    let plan = input.plan(&runtime, 7, &UNCONTROLLED_EXECUTION).unwrap();
+    let pending =
+        partial_progress_envelope(input.new_progress(&plan, &runtime, 7).unwrap(), &chunks);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("split-cas.sqlite");
+    let mut conn = db::init_db(&path).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_tagged.pdf");
+    let (mut document, mut run) = prepare_pdf_ingestion(fixture.to_str().unwrap(), None).unwrap();
+    document.document_id = normalized.document_id.clone();
+    run.document_id = normalized.document_id.clone();
+    let ingested = db::persist_ingestion(&mut conn, &document, &run).unwrap();
+    conn.execute(
+        "UPDATE pipeline_runs SET state=?1 WHERE run_id=?2",
+        rusqlite::params![
+            serde_json::to_string(&PipelineState::Synthesizing).unwrap(),
+            run.run_id
+        ],
+    )
+    .unwrap();
+    db::save_whole_synthesis_progress(
+        &mut conn,
+        &run.run_id,
+        ingested.state_version,
+        None,
+        &pending,
+    )
+    .unwrap();
+    let mut dispatched = pending.clone();
+    input
+        .dispatch_section(
+            dispatched.whole_document_progress.as_mut().unwrap(),
+            0,
+            &runtime,
+            7,
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(
+        &mut conn,
+        &run.run_id,
+        ingested.state_version,
+        Some(&pending),
+        &dispatched,
+    )
+    .unwrap();
+    let text=json!({"units":(0..64).map(|n|json!({"text":format!("Authored saturation item {n}."),"source_ids":["s1"]})).collect::<Vec<_>>()}).to_string();
+    let mut saturated = dispatched.clone();
+    input
+        .record_section(
+            saturated.whole_document_progress.as_mut().unwrap(),
+            0,
+            &ModelResponse {
+                text,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                request_attempts: vec![],
+            },
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(
+        &mut conn,
+        &run.run_id,
+        ingested.state_version,
+        Some(&dispatched),
+        &saturated,
+    )
+    .unwrap();
+    let mut split = saturated.clone();
+    input
+        .split_saturated(
+            split.whole_document_progress.as_mut().unwrap(),
+            0,
+            &runtime,
+            7,
+        )
+        .unwrap();
+    for change in 0..3 {
+        let mut forged = split.clone();
+        let progress = forged.whole_document_progress.as_mut().unwrap();
+        match change {
+            0 => progress.sections[1].primary.clear(),
+            1 => progress.sections[0].state = WholeDocumentSectionState::Pending,
+            _ => progress.sections[0].request.seed += 1,
+        }
+        assert!(db::save_whole_synthesis_progress(
+            &mut conn,
+            &run.run_id,
+            ingested.state_version,
+            Some(&saturated),
+            &forged
+        )
+        .is_err());
+    }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let workers = (0..2)
+        .map(|_| {
+            let (path, run_id, old, next, barrier, version) = (
+                path.clone(),
+                run.run_id.clone(),
+                saturated.clone(),
+                split.clone(),
+                barrier.clone(),
+                ingested.state_version,
+            );
+            std::thread::spawn(move || {
+                let mut conn = db::init_db(&path).unwrap();
+                barrier.wait();
+                match db::save_whole_synthesis_progress(
+                    &mut conn,
+                    &run_id,
+                    version,
+                    Some(&old),
+                    &next,
+                ) {
+                    Ok(()) => true,
+                    Err(StoreError::WholeDocumentProgressConflict { .. }) => false,
+                    Err(error) => panic!("unexpected split error: {error}"),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workers
+            .into_iter()
+            .filter_map(|w| w.join().unwrap().then_some(()))
+            .count(),
+        1
+    );
+    let stored = db::get_whole_synthesis_progress(&conn, &run.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, split);
+    let mut progress = stored.whole_document_progress.unwrap();
+    input.restore_progress(&progress).unwrap();
+    assert_eq!(
+        input
+            .dispatch_section(&mut progress, 0, &runtime, 7)
+            .unwrap_err()
+            .code,
+        "WHOLE_DOCUMENT_SECTION_ALREADY_DISPATCHED"
+    );
+    assert!(db::get_synthesized_document(&conn, &run.run_id)
+        .unwrap()
+        .is_none());
 }

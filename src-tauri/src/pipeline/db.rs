@@ -2614,7 +2614,8 @@ fn whole_progress_shape(value: &SynthesizedDocument, complete: bool) -> bool {
     if complete {
         progress.assembly_lineage.as_ref().is_some_and(|lineage|!lineage.is_empty() && lineage.len()>=value.summary_claims.len()
             && lineage.iter().all(|(section,_,target)|*section<progress.sections.len() && *target<value.summary_claims.len()))
-            && progress.sections.iter().all(|s|matches!(&s.state,WholeDocumentSectionState::Completed {response} if response.response_sha256==sha256_hex(response.text.as_bytes()) && response.runtime_id==progress.runtime_id && response.model_id==progress.model_id))
+            && progress.sections.iter().all(|s|matches!(&s.state,WholeDocumentSectionState::Completed {response}|WholeDocumentSectionState::Split {response} if response.response_sha256==sha256_hex(response.text.as_bytes()) && response.runtime_id==progress.runtime_id && response.model_id==progress.model_id))
+            && progress.assembly_lineage.as_ref().is_some_and(|lineage|lineage.iter().all(|(section,_,_)|matches!(progress.sections[*section].state,WholeDocumentSectionState::Completed {..})))
             && !value.summary_text.is_empty() && !value.summary_claims.is_empty() && !value.synthesis_evidence.is_empty()
     } else {
         progress.assembly_lineage.is_none()
@@ -2658,9 +2659,6 @@ pub(crate) fn save_whole_synthesis_progress(
             .whole_document_progress
             .as_ref()
             .ok_or_else(|| progress_conflict(run_id))?;
-        if p.sections.len() != q.sections.len() {
-            return Err(progress_conflict(run_id));
-        }
         let mut expected_header = prior.clone();
         expected_header.whole_document_progress = next.whole_document_progress.clone();
         let mut expected_progress = p.clone();
@@ -2668,11 +2666,21 @@ pub(crate) fn save_whole_synthesis_progress(
         if expected_header != *next || expected_progress != *q {
             return Err(progress_conflict(run_id));
         }
+        if p.permits_split(q) {
+            update_synthesis_progress(&tx, run_id, next)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        if p.sections.len() != q.sections.len() {
+            return Err(progress_conflict(run_id));
+        }
         let mut changes = 0;
         for (a, b) in p.sections.iter().zip(&q.sections) {
-            if a.primary != b.primary
-                || a.request != b.request
-                || a.request_sha256 != b.request_sha256
+            let dispatch = a.permits_dispatch(b);
+            if !dispatch
+                && (a.primary != b.primary
+                    || a.request != b.request
+                    || a.request_sha256 != b.request_sha256)
             {
                 return Err(progress_conflict(run_id));
             }
@@ -2688,6 +2696,9 @@ pub(crate) fn save_whole_synthesis_progress(
                     ) | (
                         WholeDocumentSectionState::Dispatched,
                         WholeDocumentSectionState::Failed { .. }
+                    ) | (
+                        WholeDocumentSectionState::Dispatched,
+                        WholeDocumentSectionState::Saturated { .. }
                     )
                 ) {
                     return Err(progress_conflict(run_id));

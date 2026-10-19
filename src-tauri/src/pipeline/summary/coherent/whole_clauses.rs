@@ -664,6 +664,20 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
     policy: page_furniture::Policy,
     grammar: HeadingGrammar,
 ) -> Vec<SourceClause> {
+    contract_source_inventory(document, policy, grammar).0
+}
+
+enum SourceIdentity {
+    Heading(String),
+    Introduction(String),
+    Declared(String),
+}
+
+fn contract_source_inventory(
+    document: &NormalizedDocument,
+    policy: page_furniture::Policy,
+    grammar: HeadingGrammar,
+) -> (Vec<SourceClause>, Vec<SourceIdentity>) {
     let furniture = page_furniture::Furniture::for_policy(document, policy);
     let blocks = document
         .pages
@@ -816,6 +830,25 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
             read[index].kind = LineKind::HeadingLike;
         }
     }
+    // Retain identity from the already-read lines even when a standalone title
+    // is packed into another unit. Do not recover it by re-scanning output.
+    let identities = lines
+        .iter()
+        .zip(&read)
+        .filter_map(|(fragment, read)| {
+            let text = line_text(fragment);
+            if let Some(name) = declared_source_name(text) {
+                return Some(SourceIdentity::Declared(name.to_owned()));
+            }
+            if read.title || read.kind == LineKind::HeadingLike && read.starts_unit {
+                Some(SourceIdentity::Heading(text.to_owned()))
+            } else if text.to_ascii_lowercase().starts_with("this ") {
+                Some(SourceIdentity::Introduction(text.to_owned()))
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut clauses: Vec<SourceClause> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut section_markers = HashSet::new();
@@ -1001,7 +1034,30 @@ pub(in crate::pipeline::summary) fn contract_sources_for_policy(
         }
         i += 1;
     }
-    clauses
+    (clauses, identities)
+}
+
+// Explicit self-declarations, independent of any contract/law title vocabulary.
+// An unrecognized declaration never supplies a guessed local binding.
+fn declared_source_name(text: &str) -> Option<&str> {
+    let lower = text.to_ascii_lowercase();
+    let (prefix, separator) = if lower.starts_with("the name of this ") {
+        ("the name of this ", " is ")
+    } else if lower.starts_with("this ") {
+        ("this ", " is called ")
+    } else {
+        return None;
+    };
+    let (kind, _) = lower[prefix.len()..].split_once(separator)?;
+    if kind.is_empty() || !kind.chars().all(char::is_alphabetic) {
+        return None;
+    }
+    let name = text[prefix.len() + kind.len() + separator.len()..]
+        .trim()
+        .trim_end_matches('.')
+        .trim_matches(['"', '\'', '“', '”', '‘', '’'])
+        .trim();
+    (!name.is_empty()).then_some(name)
 }
 
 pub(in crate::pipeline::summary) fn section_members(
