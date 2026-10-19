@@ -1077,3 +1077,44 @@ references to an owned heading/self-name resolve in that owned numbering scope
 when clean, and otherwise stay unresolved rather than becoming a false external. These source-only controls precede remeasurement of both inputs;
 no test labels or source bytes change. The final private report must explain
 every reference-record delta, not merely report zero blocking counts.
+
+### Review repair: identity provenance and durable saturation
+
+This records technical repairs within the accepted policy, before implementation.
+The exact-head review of 99ea8e4 found that the identity inventory in 125837d and
+resolution in fc41d12 promoted a name contained in a title or ordinary clause
+heading into ownership of the document's numbering scope. Blame confirms those
+origins. The line reader must distinguish an opening document title from body
+headings. Only a whole normalized identity equal to the declared self-name,
+opening title, or an annex title/label can own a scope. Containment and body
+heading matches remain ambiguous and block; they cannot select a local section.
+The resolver retains one owner for that decision and never guesses from words.
+
+Identity grammar inventory: the candidate added two explicit opening declaration
+forms, `The name of this <one alphabetic noun> is <name>` and
+`This <one alphabetic noun> is called <name>`. Their complete name value, with
+surrounding quotes/terminal period removed, is the identity, not any substring.
+An ordinary `This ...` introduction is only an ambiguity signal, never sufficient
+ownership. Declarations outside the opening do not declare the whole document.
+Preposed opaque names remain unsupported and blocking; no new preposed grammar
+is admitted. Restore the pre-existing document/agreement/contract forms for
+`of this ...`; Article/Exhibit/Schedule do not silently acquire whole-document
+scope through an arbitrary alphabetic noun.
+
+Saturation remains conservative: an exact filled allowance does not establish
+coverage. When the document-wide ceiling is the binding allowance, report
+`WHOLE_DOCUMENT_CLAIM_CAPACITY_EXCEEDED`, not a context/section failure. Keep the
+existing ceiling and no-partial-delivery rule. A persisted saturated response is
+immutable evidence, not an outstanding inference reservation: resume may complete
+its deterministic split with the existing compare-and-swap, without generating
+the parent again. A dispatched request remains non-resumable. Own the split
+transition in one runner path for both uninterrupted execution and recovery.
+
+Proof: fail-first amendment/sublease/containing-declaration examples with exact
+title/self-name/annex positives and a window-match mutant; current-document
+qualifier twins; document-ceiling diagnostic and persisted-saturation recovery
+regressions with no parent re-dispatch and concurrent compare-and-swap rejection.
+Then reuse the unchanged frozen baseline and complete reference delta inventory,
+format/lint/platform gates, and independent exact-head review. All model, prompt,
+sampler, framing, budget, production, ready and merge holds remain unchanged.
+Contract changes stay in docs-only commits; published history is not rewritten.
