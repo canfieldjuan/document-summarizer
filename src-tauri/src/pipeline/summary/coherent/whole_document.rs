@@ -1330,7 +1330,11 @@ pub(in crate::pipeline::summary) fn run_sections(
         }
         .into());
     }
-    for section in &progress.sections {
+    for section in progress
+        .sections
+        .iter()
+        .filter(|s| matches!(s.state, WholeDocumentSectionState::Pending))
+    {
         runtime
             .preflight_request(&section.request)
             .map_err(|failure| {
@@ -1463,16 +1467,6 @@ pub(in crate::pipeline::summary) fn run_sections(
     }
     cancellation_checkpoint(control, PipelineStage::Synthesize).map_err(stage)?;
     input.finalize_progress(&mut draft).map_err(stage)?;
-    coherent_verification_exceeds_runtime_context(
-        SummaryProfile::General,
-        runtime,
-        &draft,
-        analyzed,
-        normalized,
-        seed,
-        Some(chunked),
-    )
-    .map_err(stage)?;
     validate_synthesized_document_without_runtime(&draft, analyzed, chunked, normalized)
         .map_err(stage)?;
     Ok(draft)

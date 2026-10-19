@@ -4762,3 +4762,497 @@ fn baseline_repair_split_transition_is_atomic_and_cannot_reset_parent() {
         .unwrap()
         .is_none());
 }
+
+#[derive(Clone, Copy)]
+enum ResumeFixture {
+    Completed,
+    SplitCompleted,
+    Pending,
+    Mixed,
+    Saturated,
+}
+
+// Every backend method is counted, including Verify requests made by Synthesize.
+struct ResumeTripwire<'a> {
+    setup: &'a WholeWriterStageRuntime,
+    allow_synthesis: bool,
+    allow_health: bool,
+    allow_generation: bool,
+    comparison_only: bool,
+    preflights: std::sync::Mutex<Vec<ModelRequest>>,
+    health_calls: AtomicUsize,
+    generation_calls: AtomicUsize,
+}
+impl<'a> ResumeTripwire<'a> {
+    fn new(setup: &'a WholeWriterStageRuntime) -> Self {
+        Self {
+            setup,
+            allow_synthesis: false,
+            allow_health: false,
+            allow_generation: false,
+            comparison_only: false,
+            preflights: std::sync::Mutex::new(vec![]),
+            health_calls: AtomicUsize::new(0),
+            generation_calls: AtomicUsize::new(0),
+        }
+    }
+    fn unavailable() -> ModelRuntimeFailure {
+        ModelRuntimeFailure {
+            code: "PUBLIC_BACKEND_OFFLINE".into(),
+            message: "resume backend tripwire".into(),
+            recoverable: true,
+            request_attempts: vec![],
+        }
+    }
+}
+impl ModelRuntime for ResumeTripwire<'_> {
+    fn runtime_id(&self) -> &str {
+        self.setup.runtime_id()
+    }
+    fn model_id(&self) -> &str {
+        self.setup.model_id()
+    }
+    fn context_tokens(&self, stage: PipelineStage) -> u32 {
+        self.setup.context_tokens(stage)
+    }
+    fn preflight_request(&self, request: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+        self.preflights.lock().unwrap().push(request.clone());
+        if self.allow_synthesis && request.stage == PipelineStage::Synthesize
+            || self.comparison_only
+                && !matches!(&request.output_format,
+                ModelOutputFormat::JsonSchema { name, .. } if name == comparisons::SCHEMA_NAME)
+        {
+            return self.setup.preflight_request(request);
+        }
+        Err(Self::unavailable())
+    }
+    fn health(&self) -> Result<(), ModelRuntimeFailure> {
+        self.health_calls.fetch_add(1, Ordering::SeqCst);
+        if self.allow_health {
+            Ok(())
+        } else {
+            Err(Self::unavailable())
+        }
+    }
+    fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+        self.generation_calls.fetch_add(1, Ordering::SeqCst);
+        if self.allow_generation {
+            self.setup.generate(request)
+        } else {
+            Err(Self::unavailable())
+        }
+    }
+}
+
+fn persist_resume_response(
+    conn: &mut Connection,
+    input: &whole_document::SourceInput<'_>,
+    runtime: &WholeWriterStageRuntime,
+    run: (&str, u32),
+    draft: &mut SynthesizedDocument,
+    index: usize,
+    saturated: bool,
+) {
+    let seed = generation_seed_for_run(run.0);
+    let previous = draft.clone();
+    let request = input
+        .dispatch_section(
+            draft.whole_document_progress.as_mut().unwrap(),
+            index,
+            runtime,
+            seed,
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(conn, run.0, run.1, Some(&previous), draft).unwrap();
+    let dispatched = draft.clone();
+    let plan = input
+        .restore_progress(draft.whole_document_progress.as_ref().unwrap())
+        .unwrap();
+    let position = plan
+        .drafts
+        .iter()
+        .position(|d| d.request.ordinal as usize == index)
+        .unwrap();
+    let text = if saturated {
+        let prompt: Value = serde_json::from_str(&request.user_prompt).unwrap();
+        json!({"units":(0..prompt["maximum_units"].as_u64().unwrap()).map(|n|
+            json!({"text":format!("Saved saturated proposition {n}."),"source_ids":[prompt["sources"][0][0]]})
+        ).collect::<Vec<_>>()}).to_string()
+    } else {
+        inspection_control_responses(input, &plan)[position].clone()
+    };
+    input
+        .record_section(
+            draft.whole_document_progress.as_mut().unwrap(),
+            index,
+            &ModelResponse {
+                text,
+                runtime_id: runtime.runtime_id().into(),
+                model_id: runtime.model_id().into(),
+                request_attempts: vec![],
+            },
+        )
+        .unwrap();
+    db::save_whole_synthesis_progress(conn, run.0, run.1, Some(&dispatched), draft).unwrap();
+}
+
+fn persist_resume_fixture(
+    path: &Path,
+    runtime: &mut WholeWriterStageRuntime,
+    kind: ResumeFixture,
+) -> (
+    String,
+    NormalizedDocument,
+    ChunkedDocument,
+    SynthesizedDocument,
+) {
+    use crate::pipeline::contracts::WholeDocumentSectionState;
+    if !matches!(kind, ResumeFixture::Pending | ResumeFixture::Mixed) {
+        runtime.admission = WriterProjectionRuntime::new(usize::MAX);
+    }
+    let (mut conn, run, normalized, chunked) = whole_writer_stage_fixture(path, runtime);
+    let version = db::get_pipeline_run(&conn, &run)
+        .unwrap()
+        .unwrap()
+        .state_version;
+    let (started, analyzed) = db::start_synthesis(&mut conn, &run, version).unwrap();
+    let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+    let seed = generation_seed_for_run(&run);
+    let plan = input.plan(runtime, seed, &UNCONTROLLED_EXECUTION).unwrap();
+    let mut draft =
+        partial_progress_envelope(input.new_progress(&plan, runtime, seed).unwrap(), &chunked);
+    draft.claims = direct::source_ordered_claims(&analyzed).unwrap();
+    draft.warnings = analyzed.warnings.clone();
+    db::save_whole_synthesis_progress(&mut conn, &run, started.state_version, None, &draft)
+        .unwrap();
+    if matches!(
+        kind,
+        ResumeFixture::SplitCompleted | ResumeFixture::Saturated
+    ) {
+        assert_eq!(plan.drafts.len(), 1);
+        persist_resume_response(
+            &mut conn,
+            &input,
+            runtime,
+            (&run, started.state_version),
+            &mut draft,
+            0,
+            true,
+        );
+        if matches!(kind, ResumeFixture::SplitCompleted) {
+            let saturated = draft.clone();
+            input
+                .split_saturated(
+                    draft.whole_document_progress.as_mut().unwrap(),
+                    0,
+                    runtime,
+                    seed,
+                )
+                .unwrap();
+            db::save_whole_synthesis_progress(
+                &mut conn,
+                &run,
+                started.state_version,
+                Some(&saturated),
+                &draft,
+            )
+            .unwrap();
+        }
+    }
+    if matches!(
+        kind,
+        ResumeFixture::Completed | ResumeFixture::SplitCompleted | ResumeFixture::Mixed
+    ) {
+        if matches!(kind, ResumeFixture::Mixed) {
+            assert!(plan.drafts.len() > 1);
+        }
+        for index in 0..draft
+            .whole_document_progress
+            .as_ref()
+            .unwrap()
+            .sections
+            .len()
+        {
+            if matches!(
+                draft.whole_document_progress.as_ref().unwrap().sections[index].state,
+                WholeDocumentSectionState::Pending
+            ) {
+                persist_resume_response(
+                    &mut conn,
+                    &input,
+                    runtime,
+                    (&run, started.state_version),
+                    &mut draft,
+                    index,
+                    false,
+                );
+                if matches!(kind, ResumeFixture::Mixed) {
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        db::get_whole_synthesis_progress(&conn, &run)
+            .unwrap()
+            .unwrap(),
+        draft
+    );
+    (run, normalized, chunked, draft)
+}
+
+fn assert_completed_resume_has_no_backend_calls(allow_synthesis: bool) {
+    use crate::pipeline::contracts::PipelineState;
+    for kind in [ResumeFixture::Completed, ResumeFixture::SplitCompleted] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("saved-resume.sqlite");
+        let mut setup = WholeWriterStageRuntime::new();
+        let (run, normalized, chunked, saved) = persist_resume_fixture(&path, &mut setup, kind);
+        let input = whole_document::SourceInput::new(&normalized, &chunked).unwrap();
+        let mut expected = saved.clone();
+        input.finalize_progress(&mut expected).unwrap();
+        let mut runtime = ResumeTripwire::new(&setup);
+        runtime.allow_synthesis = allow_synthesis;
+        let mut reopened = db::init_db(&path).unwrap();
+        let result = synthesize_analyzed_document_for_policy(
+            &mut reopened,
+            &runtime,
+            &run,
+            &UNCONTROLLED_EXECUTION,
+            None,
+            WHOLE_DOCUMENT_VERSION,
+        );
+        if let Err(error) = &result {
+            assert_eq!(
+                db::get_whole_synthesis_progress(&reopened, &run)
+                    .unwrap()
+                    .unwrap(),
+                saved,
+                "failure must not delete or modify saved response bytes"
+            );
+            println!("RESUME_REPRO failure={error:?}; stages={:?}; state={:?}; saved_bytes_preserved=true",
+                runtime.preflights.lock().unwrap().iter().map(|r| &r.stage).collect::<Vec<_>>(),
+                db::get_pipeline_run(&reopened, &run).unwrap().unwrap().state);
+        }
+        assert!(
+            result.is_ok(),
+            "saved responses must assemble without a backend: {result:?}"
+        );
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(
+            db::get_synthesized_document(&reopened, &run)
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            db::get_pipeline_run(&reopened, &run)
+                .unwrap()
+                .unwrap()
+                .state,
+            PipelineState::Synthesized
+        );
+        assert!(db::get_verified_document(&reopened, &run)
+            .unwrap()
+            .is_none());
+        assert!(db::get_summary_artifact(&reopened, &run).unwrap().is_none());
+        assert!(runtime.preflights.lock().unwrap().is_empty());
+        assert_eq!(runtime.health_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.generation_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn completed_resume_never_preflights_historical_sections() {
+    assert_completed_resume_has_no_backend_calls(false);
+}
+
+#[test]
+fn completed_resume_never_preflights_future_verify_requests() {
+    assert_completed_resume_has_no_backend_calls(true);
+}
+
+#[test]
+fn completed_resume_pending_and_split_children_still_require_admission() {
+    use crate::pipeline::contracts::WholeDocumentSectionState;
+    for kind in [
+        ResumeFixture::Pending,
+        ResumeFixture::Mixed,
+        ResumeFixture::Saturated,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pending-resume.sqlite");
+        let mut setup = WholeWriterStageRuntime::new();
+        let (run, _, _, saved) = persist_resume_fixture(&path, &mut setup, kind);
+        let mut runtime = ResumeTripwire::new(&setup);
+        runtime.allow_health = true;
+        let mut conn = db::init_db(&path).unwrap();
+        let error = synthesize_analyzed_document_for_policy(
+            &mut conn,
+            &runtime,
+            &run,
+            &UNCONTROLLED_EXECUTION,
+            None,
+            WHOLE_DOCUMENT_VERSION,
+        )
+        .unwrap_err();
+        let SummaryPipelineError::StageFailed(failure) = error else {
+            panic!("wrong failure: {error:?}")
+        };
+        assert_eq!(failure.code, "PUBLIC_BACKEND_OFFLINE");
+        assert_eq!(runtime.generation_calls.load(Ordering::SeqCst), 0);
+        let requests = runtime.preflights.lock().unwrap();
+        assert!(!requests.is_empty());
+        for request in requests.iter() {
+            assert_eq!(request.stage, PipelineStage::Synthesize);
+            assert!(
+                !saved
+                    .whole_document_progress
+                    .as_ref()
+                    .unwrap()
+                    .sections
+                    .iter()
+                    .any(|s| !matches!(s.state, WholeDocumentSectionState::Pending)
+                        && s.request == *request),
+                "historical request was preflighted"
+            );
+        }
+        assert_eq!(
+            db::get_whole_synthesis_progress(&conn, &run)
+                .unwrap()
+                .unwrap(),
+            saved
+        );
+        if matches!(kind, ResumeFixture::Saturated) {
+            assert_eq!(runtime.health_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[test]
+fn completed_resume_verify_admission_still_blocks_delivery_before_generation() {
+    use crate::pipeline::contracts::PipelineState;
+    for comparison_only in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("verify-resume.sqlite");
+        let mut setup = WholeWriterStageRuntime::new();
+        let (run, _, _, _) = persist_resume_fixture(&path, &mut setup, ResumeFixture::Completed);
+        let mut conn = db::init_db(&path).unwrap();
+        let draft = synthesize_analyzed_document_for_policy(
+            &mut conn,
+            &setup,
+            &run,
+            &UNCONTROLLED_EXECUTION,
+            None,
+            WHOLE_DOCUMENT_VERSION,
+        )
+        .unwrap();
+        let mut runtime = ResumeTripwire::new(&setup);
+        runtime.comparison_only = comparison_only;
+        let error = verify_synthesized_document(&mut conn, &runtime, &run).unwrap_err();
+        let SummaryPipelineError::StageFailed(failure) = error else {
+            panic!("wrong failure: {error:?}")
+        };
+        assert_eq!(failure.code, "PUBLIC_BACKEND_OFFLINE");
+        assert_eq!(failure.stage, Some(PipelineStage::Verify));
+        assert!(failure.message.starts_with("MODEL_VERIFICATION_ADMISSION:"));
+        let requests = runtime.preflights.lock().unwrap();
+        let rejected = requests.last().expect("Verify must preflight");
+        let ModelOutputFormat::JsonSchema { name, .. } = &rejected.output_format else {
+            panic!("missing schema")
+        };
+        assert_eq!(
+            name == comparisons::SCHEMA_NAME,
+            comparison_only,
+            "ledger and comparison admission must each precede generation"
+        );
+        assert_eq!(runtime.generation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            db::get_synthesized_document(&conn, &run).unwrap().unwrap(),
+            draft
+        );
+        assert!(db::get_verified_document(&conn, &run).unwrap().is_none());
+        assert!(db::get_summary_artifact(&conn, &run).unwrap().is_none());
+        assert_eq!(
+            db::get_pipeline_run(&conn, &run).unwrap().unwrap().state,
+            PipelineState::Failed
+        );
+    }
+}
+
+#[test]
+fn completed_resume_pending_work_still_requires_backend_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pending-health.sqlite");
+    let mut setup = WholeWriterStageRuntime::new();
+    let (run, _, _, saved) = persist_resume_fixture(&path, &mut setup, ResumeFixture::Pending);
+    let mut runtime = ResumeTripwire::new(&setup);
+    runtime.allow_synthesis = true;
+    let mut conn = db::init_db(&path).unwrap();
+    let error = synthesize_analyzed_document_for_policy(
+        &mut conn,
+        &runtime,
+        &run,
+        &UNCONTROLLED_EXECUTION,
+        None,
+        WHOLE_DOCUMENT_VERSION,
+    )
+    .unwrap_err();
+    let SummaryPipelineError::StageFailed(failure) = error else {
+        panic!("wrong failure: {error:?}")
+    };
+    assert_eq!(failure.code, "PUBLIC_BACKEND_OFFLINE");
+    assert!(failure.message.starts_with("MODEL_HEALTH:"));
+    assert!(!runtime.preflights.lock().unwrap().is_empty());
+    assert_eq!(runtime.health_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.generation_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        db::get_whole_synthesis_progress(&conn, &run)
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn completed_resume_fresh_synthesis_also_leaves_verify_admission_to_verify() {
+    use crate::pipeline::contracts::PipelineState;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fresh-boundary.sqlite");
+    let setup = WholeWriterStageRuntime::new();
+    let (mut conn, run, _, _) = whole_writer_stage_fixture(&path, &setup);
+    let mut runtime = ResumeTripwire::new(&setup);
+    runtime.allow_synthesis = true;
+    runtime.allow_health = true;
+    runtime.allow_generation = true;
+    let draft = synthesize_analyzed_document_for_policy(
+        &mut conn,
+        &runtime,
+        &run,
+        &UNCONTROLLED_EXECUTION,
+        None,
+        WHOLE_DOCUMENT_VERSION,
+    )
+    .unwrap();
+    assert!(runtime
+        .preflights
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.stage == PipelineStage::Synthesize));
+    assert_eq!(
+        db::get_pipeline_run(&conn, &run).unwrap().unwrap().state,
+        PipelineState::Synthesized
+    );
+    let generated = runtime.generation_calls.load(Ordering::SeqCst);
+    assert!(generated > 0);
+    runtime.allow_generation = false;
+    assert!(verify_synthesized_document(&mut conn, &runtime, &run).is_err());
+    assert_eq!(runtime.generation_calls.load(Ordering::SeqCst), generated);
+    assert_eq!(
+        db::get_synthesized_document(&conn, &run).unwrap().unwrap(),
+        draft
+    );
+    assert!(db::get_verified_document(&conn, &run).unwrap().is_none());
+    assert!(db::get_summary_artifact(&conn, &run).unwrap().is_none());
+}
