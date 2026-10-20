@@ -6301,13 +6301,50 @@ mod tests {
         assert!(runtime.requests.lock().unwrap().is_empty());
     }
 
-    #[test]
-    #[ignore = "offline preparation only; explicit frozen source/count/case packet required"]
-    fn whole_writer_prepare_frozen_requests() {
+    fn preparation_source(
+        spec: &Value,
+    ) -> (
+        crate::pipeline::contracts::ParsedDocument,
+        NormalizedDocument,
+        crate::pipeline::contracts::StructuredDocument,
+        ChunkedDocument,
+    ) {
         use crate::pipeline::contracts::{
             DocumentChunker, DocumentNormalizer, ParsedDocument, ParsedPage, SourceType,
             StructureInterpreter,
         };
+        let alias = spec["alias"].as_str().unwrap();
+        let bytes = std::fs::read(spec["path"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            spec["sha256"].as_str().unwrap()
+        );
+        let parsed = ParsedDocument {
+            document_id: alias.into(),
+            parser_id: "frozen-preproduction-text".into(),
+            parser_version: "1.0.0".into(),
+            source_type: SourceType::NativeText,
+            pages: vec![ParsedPage {
+                page_number: 1,
+                text: String::from_utf8(bytes).unwrap(),
+                warnings: vec![],
+                requires_visual_processing: false,
+            }],
+            warnings: vec![],
+        };
+        let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
+        let structured = DeterministicStructureInterpreter::new()
+            .interpret(&normalized)
+            .unwrap();
+        let chunked = DeterministicDocumentChunker::new()
+            .chunk(&normalized, &structured)
+            .unwrap();
+        (parsed, normalized, structured, chunked)
+    }
+
+    #[test]
+    #[ignore = "offline preparation only; explicit frozen source/count/case packet required"]
+    fn whole_writer_prepare_frozen_requests() {
         use crate::pipeline::llama_cpp::framing_tests::OfflineNativeCountRuntime;
         use std::io::Write;
         let read = |path: &std::path::Path| -> Value {
@@ -6355,6 +6392,8 @@ mod tests {
                 self.counter.context_tokens(s)
             }
         }
+        let analyze_mode = packet["version"] == 2;
+        let mut stopped = false;
         let mut rows = Vec::new();
         for spec in source["inputs"].as_array().unwrap() {
             let alias = spec["alias"].as_str().unwrap();
@@ -6363,31 +6402,6 @@ mod tests {
                 .unwrap()
                 .iter()
                 .find(|c| c["alias"] == alias)
-                .unwrap();
-            let bytes = std::fs::read(spec["path"].as_str().unwrap()).unwrap();
-            assert_eq!(
-                format!("{:x}", Sha256::digest(&bytes)),
-                spec["sha256"].as_str().unwrap()
-            );
-            let parsed = ParsedDocument {
-                document_id: alias.into(),
-                parser_id: "frozen-preproduction-text".into(),
-                parser_version: "1.0.0".into(),
-                source_type: SourceType::NativeText,
-                pages: vec![ParsedPage {
-                    page_number: 1,
-                    text: String::from_utf8(bytes).unwrap(),
-                    warnings: vec![],
-                    requires_visual_processing: false,
-                }],
-                warnings: vec![],
-            };
-            let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
-            let structured = DeterministicStructureInterpreter::new()
-                .interpret(&normalized)
-                .unwrap();
-            let chunked = DeterministicDocumentChunker::new()
-                .chunk(&normalized, &structured)
                 .unwrap();
             let archived = case.get("analyzed").map(|binding| {
                 let bytes = std::fs::read(binding["path"].as_str().unwrap()).unwrap();
@@ -6411,6 +6425,25 @@ mod tests {
                     "frozen profile must match product admission and the native 9B baseline",
                 );
             }
+            if analyze_mode {
+                let context = counter.context_tokens(PipelineStage::Analyze);
+                let profile = metadata.as_ref().expect("Analyze profile must be frozen");
+                assert_eq!(profile.analysis.context_tokens, context);
+                let mut row = if stopped {
+                    analyze_preparation_metadata(case, context)
+                } else {
+                    analyze_preparation_row(spec, case, context, Some(profile))
+                };
+                stopped |= !matches!(
+                    row["status"].as_str(),
+                    Some("captured" | "no_model_request")
+                );
+                row["alias"] = json!(alias);
+                row["source_sha256"] = spec["sha256"].clone();
+                rows.push(row);
+                continue;
+            }
+            let (_, normalized, _, chunked) = preparation_source(spec);
             let view = Metadata {
                 probes: Mutex::new(std::collections::BTreeSet::new()),
                 counter: &counter,
@@ -6455,10 +6488,268 @@ mod tests {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        options.open(out).unwrap().write_all(&serde_json::to_vec_pretty(&json!({"cases":rows,"generation_calls":0,"runtime_startups":0,"native_qualified":false})).unwrap()).unwrap();
+        options.open(out).unwrap().write_all(&serde_json::to_vec_pretty(&json!({"cases":rows,"generation_calls":0,"runtime_startups":0,"tokenizer_http_calls":0,"native_qualified":false})).unwrap()).unwrap();
         println!(
             "WRITER_PREPARATION_SAVED generation_calls=0 runtime_startups=0 native_qualified=false"
         );
+    }
+
+    #[test]
+    #[ignore = "offline Analyze capture only; explicit frozen packet required"]
+    fn whole_analyze_prepare_frozen_requests() {
+        whole_writer_prepare_frozen_requests();
+    }
+
+    struct AnalyzePreparationRuntime {
+        context: u32,
+        model: String,
+        runtime: String,
+        health_calls: AtomicUsize,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelRuntime for AnalyzePreparationRuntime {
+        fn generate(&self, request: &ModelRequest) -> Result<ModelResponse, ModelRuntimeFailure> {
+            self.requests.lock().unwrap().push(request.clone());
+            Err(ModelRuntimeFailure {
+                code: "ANALYZE_PREPARATION_CAPTURED".into(),
+                message: "Logical request recorded; no dispatch".into(),
+                recoverable: false,
+                request_attempts: vec![],
+            })
+        }
+        fn health(&self) -> Result<(), ModelRuntimeFailure> {
+            self.health_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(()) // Offline stub; the report never claims runtime health was evaluated.
+        }
+        fn preflight_request(&self, _: &ModelRequest) -> Result<(), ModelRuntimeFailure> {
+            panic!("ANALYZE_PREPARATION_NATIVE_PREFLIGHT_FORBIDDEN")
+        }
+        fn runtime_id(&self) -> &str {
+            &self.runtime
+        }
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+        fn context_tokens(&self, _: PipelineStage) -> u32 {
+            self.context
+        }
+    }
+
+    fn analyze_preparation_metadata(case: &Value, context: u32) -> Value {
+        let run_id = case["run_id"].as_str().unwrap();
+        let seed = generation_seed_for_run(run_id);
+        assert_eq!(
+            case["expected_seed"], seed,
+            "frozen production seed changed"
+        );
+        assert_eq!(case["context_tokens_analyze"], context);
+        assert_eq!(case.get("delivery_policy"), Some(&Value::Null));
+        json!({"run_id":run_id,"seed":seed,"summary_profile":case["summary_profile"],
+            "delivery_policy":null,"context_tokens_analyze":context,
+            "health":"not_evaluated_offline","health_calls":0,
+            "native_token_fit":"not_evaluated_offline","pages_request_fits":"not_evaluated",
+            "wire_bodies_approved":false,"analyzed_artifact_present":false,
+            "status":"not_attempted","requests":[]})
+    }
+
+    fn analyze_preparation_row(
+        spec: &Value,
+        case: &Value,
+        context: u32,
+        profile: Option<&crate::pipeline::contracts::ModelProfileSnapshot>,
+    ) -> Value {
+        use crate::pipeline::contracts::IngestedDocument;
+        let mut row = analyze_preparation_metadata(case, context);
+        let summary_profile: SummaryProfile =
+            serde_json::from_value(case["summary_profile"].clone()).unwrap();
+        let (parsed, normalized, structured, chunked) = preparation_source(spec);
+        let mut conn = db::init_db(":memory:").unwrap();
+        let now = chrono::Utc::now();
+        let document = IngestedDocument {
+            document_id: parsed.document_id.clone(),
+            original_filename: "frozen-source.txt".into(),
+            file_type: "txt".into(),
+            source_type: parsed.source_type,
+            byte_size: std::fs::metadata(spec["path"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            content_hash: spec["sha256"].as_str().unwrap().into(),
+            local_source_path: spec["path"].as_str().unwrap().into(),
+            created_at: now,
+        };
+        let mut run =
+            crate::pipeline::ingest::prepare_received_run(parsed.document_id.clone(), now);
+        run.run_id = case["run_id"].as_str().unwrap().into();
+        let run = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &run,
+            profile,
+            summary_profile,
+        )
+        .unwrap();
+        let (run, _) = db::start_parsing(&mut conn, &run.run_id, run.state_version).unwrap();
+        let run = db::complete_parsing(&mut conn, &run.run_id, run.state_version, &parsed, vec![])
+            .unwrap();
+        let (run, _) = db::start_normalizing(&mut conn, &run.run_id, run.state_version).unwrap();
+        let run = db::complete_normalization(
+            &mut conn,
+            &run.run_id,
+            run.state_version,
+            &normalized,
+            vec![],
+        )
+        .unwrap();
+        let (run, _) = db::start_structuring(&mut conn, &run.run_id, run.state_version).unwrap();
+        let run = db::complete_structuring(
+            &mut conn,
+            &run.run_id,
+            run.state_version,
+            &structured,
+            vec![],
+        )
+        .unwrap();
+        let (run, _, _) = db::start_chunking(&mut conn, &run.run_id, run.state_version).unwrap();
+        let run =
+            db::complete_chunking(&mut conn, &run.run_id, run.state_version, &chunked, vec![])
+                .unwrap();
+        // Exercise real entry routing but forbid even the deterministic Contract
+        // path from persisting an analysis in this recording-only database.
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER preparation_no_analysis BEFORE INSERT ON analyzed_documents
+            BEGIN SELECT RAISE(ABORT, 'OFFLINE_ANALYSIS_PERSISTENCE_FORBIDDEN'); END;",
+        )
+        .unwrap();
+        let runtime = AnalyzePreparationRuntime {
+            context,
+            model: profile
+                .map(|p| p.analysis.model_digest.clone())
+                .unwrap_or_else(|| "offline-model".into()),
+            runtime: case["runtime_id"].as_str().unwrap().into(),
+            health_calls: AtomicUsize::new(0),
+            requests: Mutex::new(vec![]),
+        };
+        let result = analyze_chunked_document_controlled_with_delivery(
+            &mut conn,
+            &runtime,
+            &run.run_id,
+            &UNCONTROLLED_EXECUTION,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "offline preparation must not return an AnalyzedDocument"
+        );
+        assert!(db::get_analyzed_document(&conn, &run.run_id)
+            .unwrap()
+            .is_none());
+        let error = result.unwrap_err();
+        let code = match &error {
+            SummaryPipelineError::StageFailed(f) => {
+                row["stop_stage"] = json!(f.stage);
+                row["stop_recoverable"] = json!(f.recoverable);
+                f.code.clone()
+            }
+            _ => error.to_string(),
+        };
+        let requests = runtime.requests.lock().unwrap();
+        row["health_calls"] = json!(runtime.health_calls.load(Ordering::SeqCst));
+        row["stop_code"] = json!(code);
+        if summary_profile == SummaryProfile::Contract {
+            assert!(requests.is_empty());
+            assert_eq!(row["health_calls"], 0);
+            row["status"] = json!("no_model_request");
+            row["route"] = json!("contract_extraction");
+            row["pages_request_fits"] = json!("not_evaluated_no_model_route");
+        } else if code == "ANALYZE_PREPARATION_CAPTURED" {
+            assert_eq!(requests.len(), 1);
+            let request = &requests[0];
+            assert_eq!(request.seed, generation_seed_for_run(&run.run_id));
+            assert_eq!(request.stage, PipelineStage::Analyze);
+            assert_eq!(row["stop_stage"], json!(PipelineStage::Analyze));
+            assert_eq!(row["stop_recoverable"], false);
+            row["route"] = json!("pages");
+            row["status"] = json!("captured");
+            row["pages_request_fits"] = json!(true);
+            row["requests"] = json!([{"request":request,"request_json":serde_json::to_string(request).unwrap(),
+                "request_sha256":request.integrity_sha256().unwrap()}]);
+        } else {
+            assert!(requests.is_empty());
+            row["status"] = json!(if code == "ANALYSIS_REQUEST_TOO_LARGE" {
+                "admission_rejected"
+            } else {
+                "stopped_before_request"
+            });
+            if code == "ANALYSIS_REQUEST_TOO_LARGE" {
+                row["pages_request_fits"] = json!(false);
+            }
+        }
+        row
+    }
+
+    fn public_analysis_preparation_case(run_id: &str, context: u32, profile: &str) -> Value {
+        json!({"run_id":run_id,"expected_seed":generation_seed_for_run(run_id),
+            "runtime_id":"llama.cpp-qwen-gguf","summary_profile":profile,
+            "delivery_policy":null,"context_tokens_analyze":context})
+    }
+
+    #[test]
+    fn analyze_preparation_captures_real_entry_seed_without_analysis() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.txt");
+        let text = "The operator shall retain inspection records for seven years.";
+        std::fs::write(&path, text).unwrap();
+        let spec = json!({"alias":"public-source","path":path,"sha256":format!("{:x}",Sha256::digest(text.as_bytes()))});
+        let mut hashes = Vec::new();
+        for run in ["public-run-a", "public-run-b"] {
+            let case = public_analysis_preparation_case(run, 32768, "general");
+            let row = analyze_preparation_row(&spec, &case, 32768, None);
+            assert_eq!(row["status"], "captured");
+            assert_eq!(row["stop_code"], "ANALYZE_PREPARATION_CAPTURED");
+            assert_eq!(row["seed"], generation_seed_for_run(run));
+            assert_ne!(row["seed"], TEST_GENERATION_SEED);
+            assert_eq!(row["health"], "not_evaluated_offline");
+            assert_eq!(row["health_calls"], 1);
+            assert_eq!(row["native_token_fit"], "not_evaluated_offline");
+            assert_eq!(row["wire_bodies_approved"], false);
+            assert_eq!(row["analyzed_artifact_present"], false);
+            hashes.push(row["requests"][0]["request_sha256"].clone());
+        }
+        assert_ne!(hashes[0], hashes[1]);
+        let small = public_analysis_preparation_case("small", 1, "general");
+        let row = analyze_preparation_row(&spec, &small, 1, None);
+        assert_eq!(row["status"], "admission_rejected");
+        assert_eq!(row["pages_request_fits"], false);
+        assert!(row["requests"].as_array().unwrap().is_empty());
+        let contract = public_analysis_preparation_case("contract", 32768, "contract");
+        let row = analyze_preparation_row(&spec, &contract, 32768, None);
+        assert_eq!(row["status"], "no_model_request");
+        assert_eq!(row["route"], "contract_extraction");
+        assert!(row["stop_code"]
+            .as_str()
+            .unwrap()
+            .contains("OFFLINE_ANALYSIS_PERSISTENCE_FORBIDDEN"));
+        assert_eq!(row["health_calls"], 0);
+        assert!(row["requests"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn analyze_preparation_rejects_changed_entry_bindings_before_recording() {
+        let good = public_analysis_preparation_case("bound-run", 32768, "general");
+        for (key, value) in [
+            ("run_id", json!("changed-run")),
+            ("expected_seed", json!(0)),
+            ("expected_seed", json!(TEST_GENERATION_SEED)),
+            ("context_tokens_analyze", json!(32767)),
+            ("delivery_policy", json!({"connect":true})),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(
+                std::panic::catch_unwind(|| analyze_preparation_metadata(&bad, 32768)).is_err()
+            );
+        }
     }
 
     const TEST_GENERATION_SEED: u64 = 9_876_543;

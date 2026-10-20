@@ -1,5 +1,5 @@
 {
-  "status": "ACCEPTED_OFFLINE_ONLY_NOT_IMPLEMENTED",
+  "status": "OFFLINE_IMPLEMENTED_VERIFICATION_IN_PROGRESS",
   "title": "Prepare the existing Analyze requests for the frozen whole-writer inputs",
   "source_head": "a1397fb1e1e30b19aee11f63a3ecdd861f143890",
   "inventory": {
@@ -127,16 +127,15 @@
     "tokenizer_http": 0,
     "server_startups": 0
   },
-  "implementation_summary": "Contract proposal only; no implementation, no repository edit.",
+  "implementation_summary": "Implemented the accepted recording-only Analyze mode in the existing preparation entry and launcher. It calls the unchanged production Analyze entry, captures the actual logical request with a typed stop, records admission levels, and prevents persisted analysis in an in-memory database. Shared source/freeze/output owners are reused; historical writer mode retains its startup guard.",
   "cold_diff_audit": "Working checkout remains unchanged. Evidence and proposal live outside worktree; original reports preserved.",
   "gap_audit": {
     "status": "NOT DONE",
     "remaining": [
-      "Independent contract review",
-      "Direct operator acceptance before implementation",
-      "Offline logical Analyze request capture/pages character-fit evidence; native health and native token admission intentionally remain unmeasured.",
-      "Separate accepted live scope/budget before creating genuine Analyze artifacts",
-      "Whole-writer native generation and independent fidelity qualification remain unperformed"
+      "Final focused lint/tests and source-bound frozen lane",
+      "Run the new offline preparation on frozen inputs and preserve writer request/probe parity",
+      "Independent exact-head review and CI",
+      "Separate accepted live scope/budget; all existing qualification and production holds remain"
     ]
   },
   "revision": {
