@@ -1,5 +1,5 @@
 {
-  "status": "OFFLINE_IMPLEMENTED_VERIFICATION_IN_PROGRESS",
+  "status": "OFFLINE_IMPLEMENTED_EXISTING_CHARACTER_ADMISSION_STOP",
   "title": "Prepare the existing Analyze requests for the frozen whole-writer inputs",
   "source_head": "a1397fb1e1e30b19aee11f63a3ecdd861f143890",
   "inventory": {
@@ -128,21 +128,25 @@
     "server_startups": 0
   },
   "implementation_summary": "Implemented the accepted recording-only Analyze mode in the existing preparation entry and launcher. It calls the unchanged production Analyze entry, captures the actual logical request with a typed stop, records admission levels, and prevents persisted analysis in an in-memory database. Shared source/freeze/output owners are reused; historical writer mode retains its startup guard.",
-  "cold_diff_audit": "Working checkout remains unchanged. Evidence and proposal live outside worktree; original reports preserved.",
+  "cold_diff_audit": {
+    "docs/PR-OFFLINE-ANALYZE-PREPARATION-CONTRACT.json": "Accepted v3 contract, direct acceptance, actual offline results and explicit stop/holds.",
+    "scripts/c9-preproduction-parity.py": "Analyze mode reuses the existing preparation lifecycle and validates neutral offline admission labels; existing writer mode remains supported.",
+    "scripts/test_c9_preproduction_parity.py": "Analyze launcher and entry-binding boundary regressions; existing launcher tests preserved.",
+    "src-tauri/src/pipeline/summary.rs": "Only existing test module changed. Shared source preparation, real Analyze entry recorder, typed stop and ephemeral persistence barrier. Production code byte-identical to a1397fb."
+  },
   "gap_audit": {
     "status": "NOT DONE",
     "remaining": [
-      "Final focused lint/tests and source-bound frozen lane",
-      "Run the new offline preparation on frozen inputs and preserve writer request/probe parity",
-      "Independent exact-head review and CI",
-      "Separate accepted live scope/budget; all existing qualification and production holds remain"
+      "Exact-head independent review and CI for this offline implementation.",
+      "The unchanged production character-admission gate rejects the first frozen input. This accepted slice stops without changing limits, input layout or scope; no Analyze artifact or frozen logical request was produced.",
+      "Any remedy or live Analyze work requires a separately accepted scope and budget. All production, ready, merge and PR116 holds remain."
     ]
   },
   "revision": {
     "version": 3,
     "supersedes_sha256": "1b1f685a357c6e574f086cb9c5137c37baea786c7cc473eb5125e568f2af023d",
     "reason": "Complete the production execution context and distinguish the logical request/character gate from health/native admission; oversight R1-R4 in comment6280632924.",
-    "operator_acceptance": "Required after independent review; not accepted or implemented."
+    "operator_acceptance": "Accepted directly by the operator before implementation; see top-level operator_acceptance. Original reviewed contract fingerprint retained."
   },
   "capture_contract": {
     "production_entry": {
@@ -206,12 +210,56 @@
     "R3": "Analyze-specific offline health answer and neutral label; preserve writer startup guard.",
     "R4": "Separate character gate/native-token gate; logical integrity hash only; root wording corrected.",
     "additional": "Record frozen Analyze context; typed Result stop; assert no returned/persisted AnalyzedDocument.",
-    "evidence": "All source inspection at a1397fb; no implementation or code test changed."
+    "evidence": "Contract review source inspection was at a1397fb; implementation and verification results below are subsequent evidence."
   },
   "operator_acceptance": {
     "message": "I accept the revised offline Analyze-preparation contract. Let\u2019s implement it.",
     "accepted_contract_sha256": "7f186af77d95c152ed57101bbdb0266a7a81488f9757b6b140d0016580e37116",
     "scope": "Offline Analyze preparation only; zero live authorization",
     "recorded_at": "2026-10-20T01:35:11.728716+00:00"
+  },
+  "verification_results": {
+    "tested_code_commit": "7c341fe56fb3301598981a1250da1555883a84ea",
+    "focused_rust": "3 passed; 0 failed",
+    "python": "33 tests; OK",
+    "format": "PASS",
+    "strict_clippy": "PASS",
+    "git_diff_check": "PASS",
+    "valid_assertion_mutants_killed": [
+      "production seed substitution",
+      "false health pass",
+      "removed analysis persistence barrier"
+    ],
+    "invalid_probe_retained": "The first seed mutant referenced a test-only constant in production scope and failed compilation; excluded from the three assertion kills.",
+    "frozen_owners_passed": [
+      "counter",
+      "dependencies",
+      "capacity",
+      "assembly",
+      "consolidation-boundary",
+      "c9",
+      "same60"
+    ],
+    "complete_reports_byte_identical": [
+      "dependencies",
+      "capacity",
+      "assembly",
+      "same60"
+    ],
+    "writer_preparation": "Both complete case records equal the earlier preparation, including complete initial requests, probe hash lists, counts and stage-entry result. Only a top-level tokenizer_http_calls=0 field was added.",
+    "analyze_preparation": {
+      "preproduction-1": "admission_rejected: ANALYSIS_REQUEST_TOO_LARGE; pages_request_fits=false; no logical request captured",
+      "preproduction-2": "not_attempted after first real failure",
+      "origin": "pages.rs::generate calls request_fits before constructing ModelRequest; generation_input_character_limit_for_context caps system+serialized-user at MAX_SYNTHESIS_REQUEST_CHARACTERS (16000). No native token fit was evaluated.",
+      "health": "not_evaluated_offline",
+      "native_token_fit": "not_evaluated_offline",
+      "returned_or_persisted_analysis": false,
+      "generation_calls": 0,
+      "server_startups": 0,
+      "tokenizer_http_calls": 0,
+      "delegated_native_preflights": 0
+    },
+    "durable_public_report_alias": "whole-writer-prerequisite-recovery-20261019/implementation/verification-report.json",
+    "durable_public_report_sha256": "f4ddd08bfd73045d2c381ca7089c90b29f8abbccdcee11e31e5aa4ebb6fb514c"
   }
 }
