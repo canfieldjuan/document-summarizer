@@ -249,12 +249,22 @@ fn read_readiness(file: &mut File, identity: (u64, u64)) -> Result<String, Store
     Ok(text)
 }
 
+fn primary_is_live(primary: &File) -> Result<bool, StoreError> {
+    // Absence probes must coexist: only the primary's exclusive lock may
+    // produce contention. An exclusive probe would impersonate that owner.
+    match primary.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn require_primary(path: &Path) -> Result<(), StoreError> {
     let primary = lock_file(&sidecar(path, ".owner.lock"), false)?;
-    match primary.try_lock() {
-        Ok(()) => Err(StoreError::Unavailable),
-        Err(TryLockError::WouldBlock) => Ok(()),
-        Err(TryLockError::Error(error)) => Err(error.into()),
+    if primary_is_live(&primary)? {
+        Ok(())
+    } else {
+        Err(StoreError::Unavailable)
     }
 }
 
@@ -749,6 +759,73 @@ mod tests {
             Store::attach_wait(&failed.0).is_err(),
             "failed bootstrap made a ready store"
         );
+    }
+
+    #[test]
+    fn overlapping_absence_probe_cannot_impersonate_primary() {
+        let file = DatabaseFixture::new();
+        let primary = Store::initialize(&file.0).unwrap();
+        let consumer = Store::attach(&file.0).unwrap();
+        let access = crate::pipeline::db::StoreAccess::prepared(consumer.clone());
+        drop(primary);
+
+        std::thread::scope(|scope| {
+            let (probed_tx, probed_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let path = consumer.path();
+            scope.spawn(move || {
+                let gate = lock_file(&sidecar(path, ".initialize.lock"), false).unwrap();
+                shared(&gate).unwrap();
+                let probe = lock_file(&sidecar(path, ".owner.lock"), false).unwrap();
+                assert!(!primary_is_live(&probe).unwrap());
+                // Suspend the real probe after acquiring its absence lock, before
+                // require_primary would drop the File. No scheduling delay needed.
+                probed_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                drop(probe);
+                drop(gate);
+            });
+            probed_rx.recv().unwrap();
+            assert!(
+                matches!(access.get(), Err(StoreError::Unavailable)),
+                "desktop inherited departed primary readiness from another probe"
+            );
+            assert!(matches!(consumer.reader(), Err(StoreError::Unavailable)));
+            assert!(matches!(consumer.writer(), Err(StoreError::Unavailable)));
+            assert!(matches!(
+                Store::attach(&file.0),
+                Err(StoreError::Unavailable)
+            ));
+            assert!(is_contention(&Store::initialize(&file.0).unwrap_err()));
+            release_tx.send(()).unwrap();
+        });
+        assert!(matches!(consumer.reader(), Err(StoreError::Unavailable)));
+        drop(access);
+        drop(consumer);
+        assert!(Store::initialize(&file.0).unwrap().reader().is_ok());
+    }
+
+    #[test]
+    fn readiness_probes_preserve_live_primary_and_release_without_authority() {
+        let file = DatabaseFixture::new();
+        let primary = Store::initialize(&file.0).unwrap();
+        let consumer = Store::attach(&file.0).unwrap();
+        let access = crate::pipeline::db::StoreAccess::prepared(consumer.clone());
+        let probes = [
+            lock_file(&sidecar(consumer.path(), ".owner.lock"), false).unwrap(),
+            lock_file(&sidecar(consumer.path(), ".owner.lock"), false).unwrap(),
+        ];
+        for probe in &probes {
+            assert!(primary_is_live(probe).unwrap());
+        }
+        assert!(access.get().is_ok());
+        assert!(consumer.reader().is_ok());
+        assert!(consumer.writer().is_ok());
+        assert!(Store::attach(&file.0).is_ok());
+        drop(primary);
+        // Contended probes acquired no authority and cannot retain a departed owner.
+        assert!(matches!(access.get(), Err(StoreError::Unavailable)));
+        assert!(matches!(consumer.reader(), Err(StoreError::Unavailable)));
     }
 
     #[test]
