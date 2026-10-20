@@ -42,7 +42,6 @@
   "gap_audit": {
     "status": "NOT DONE",
     "remaining": [
-      "Fresh seven-owner frozen gate before publication",
       "New exact-head CI and independent review",
       "Initial requests only; full Analyze and native token fit are unqualified",
       "Affected writer requests, call ceilings and live approval freezes require recomputation under a later accepted scope",
@@ -82,6 +81,8 @@
     "delegated_native_preflights": 0,
     "analyzed_artifact_present": false,
     "public_report_alias": "pdf-source-preparation-20261020/report.json",
-    "public_report_sha256": "6bebef08d00a25670a380e97e9c4cb755aa793d8b675aadec86de414c2402c1d"
+    "public_report_sha256": "6bebef08d00a25670a380e97e9c4cb755aa793d8b675aadec86de414c2402c1d",
+    "frozen_gate": "Seven owners passed; complete dependency/capacity/assembly/SAME60 reports byte-identical to parent. This preserves the old historical projection; it does not qualify the new PDF writer projection.",
+    "frozen_proof_sha256": "ed28930cc2e2aa381203d3c03e59092e26dfbbc48d67ff99707b8fcb3b7bb2c7"
   }
 }
