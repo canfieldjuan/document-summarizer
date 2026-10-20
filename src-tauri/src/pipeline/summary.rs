@@ -6319,18 +6319,32 @@ mod tests {
             format!("{:x}", Sha256::digest(&bytes)),
             spec["sha256"].as_str().unwrap()
         );
-        let parsed = ParsedDocument {
-            document_id: alias.into(),
-            parser_id: "frozen-preproduction-text".into(),
-            parser_version: "1.0.0".into(),
-            source_type: SourceType::NativeText,
-            pages: vec![ParsedPage {
-                page_number: 1,
-                text: String::from_utf8(bytes).unwrap(),
+        let parsed = if spec["file_type"] == "pdf" {
+            use crate::pipeline::contracts::DocumentParser;
+            let (mut document, _) = crate::pipeline::ingest::prepare_pdf_ingestion(
+                spec["path"].as_str().unwrap(),
+                Some("frozen-source.pdf"),
+            )
+            .unwrap();
+            assert_eq!(document.content_hash, spec["sha256"].as_str().unwrap());
+            document.document_id = alias.into();
+            crate::pipeline::parser::PdfExtractParser::new()
+                .parse(&document)
+                .unwrap()
+        } else {
+            ParsedDocument {
+                document_id: alias.into(),
+                parser_id: "frozen-preproduction-text".into(),
+                parser_version: "1.0.0".into(),
+                source_type: SourceType::NativeText,
+                pages: vec![ParsedPage {
+                    page_number: 1,
+                    text: String::from_utf8(bytes).unwrap(),
+                    warnings: vec![],
+                    requires_visual_processing: false,
+                }],
                 warnings: vec![],
-                requires_visual_processing: false,
-            }],
-            warnings: vec![],
+            }
         };
         let normalized = CanonicalNormalizer::new().normalize(&parsed).unwrap();
         let structured = DeterministicStructureInterpreter::new()
@@ -6568,8 +6582,13 @@ mod tests {
         let now = chrono::Utc::now();
         let document = IngestedDocument {
             document_id: parsed.document_id.clone(),
-            original_filename: "frozen-source.txt".into(),
-            file_type: "txt".into(),
+            original_filename: if spec["file_type"] == "pdf" {
+                "frozen-source.pdf"
+            } else {
+                "frozen-source.txt"
+            }
+            .into(),
+            file_type: spec["file_type"].as_str().unwrap_or("txt").into(),
             source_type: parsed.source_type,
             byte_size: std::fs::metadata(spec["path"].as_str().unwrap())
                 .unwrap()
@@ -6732,6 +6751,127 @@ mod tests {
             .contains("OFFLINE_ANALYSIS_PERSISTENCE_FORBIDDEN"));
         assert_eq!(row["health_calls"], 0);
         assert!(row["requests"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "offline PDF provenance only; explicit hash-bound candidate packet required"]
+    fn pdf_source_prepare_frozen_inputs() {
+        use std::io::Write;
+        let input =
+            std::path::PathBuf::from(std::env::var("DOC_SUM_PDF_PREPARATION_INPUT").unwrap());
+        let packet_bytes = std::fs::read(&input).unwrap();
+        let packet: Value = serde_json::from_slice(&packet_bytes).unwrap();
+        assert_eq!(packet["version"], 1);
+        assert_eq!(packet["live_authorization"], 0);
+        let measure = match packet["mode"].as_str().unwrap() {
+            "parse" => false,
+            "measure" => true,
+            _ => panic!("Unknown PDF preparation mode"),
+        };
+        let mut rows = Vec::new();
+        for spec in packet["cases"].as_array().unwrap() {
+            assert_eq!(spec["file_type"], "pdf");
+            let (parsed, normalized, structured, chunked) = preparation_source(spec);
+            let mut row = json!({"alias":spec["alias"],"owner_alias":spec["owner_alias"],
+                "pdf_sha256":spec["sha256"],"parsed":parsed,
+                "normalized":normalized,"structured":structured,"chunked":chunked,
+                "claim_budget":document_claim_budget(&normalized).unwrap(),
+                "parsed_json":serde_json::to_string(&parsed).unwrap()});
+            if measure {
+                let binding = &spec["provenance_binding"];
+                let bytes = std::fs::read(binding["path"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    binding["sha256"].as_str().unwrap()
+                );
+                let approved: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(approved["pdf_sha256"], spec["sha256"]);
+                assert_eq!(
+                    approved["status"],
+                    "bound_with_recorded_extraction_differences"
+                );
+                let frozen_text =
+                    std::fs::read(spec["frozen_text"]["path"].as_str().unwrap()).unwrap();
+                let frozen_hash = format!("{:x}", Sha256::digest(&frozen_text));
+                assert_eq!(approved["frozen_text_sha256"], frozen_hash);
+                assert_eq!(spec["frozen_text"]["sha256"], frozen_hash);
+                assert_eq!(
+                    approved["parsed_json_sha256"],
+                    format!(
+                        "{:x}",
+                        Sha256::digest(row["parsed_json"].as_str().unwrap().as_bytes())
+                    )
+                );
+                let entry = &spec["entry"];
+                let profile_bytes =
+                    std::fs::read(entry["profile"]["path"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&profile_bytes)),
+                    entry["profile"]["sha256"].as_str().unwrap()
+                );
+                let profile: crate::pipeline::contracts::ModelProfileSnapshot =
+                    serde_json::from_slice(&profile_bytes).unwrap();
+                assert_eq!(
+                    profile.analysis.context_tokens,
+                    entry["context_tokens_analyze"]
+                );
+                crate::pipeline::model_settings::offline_whole_writer_profile(&profile).unwrap();
+                row["initial_analyze"] = analyze_preparation_row(
+                    spec,
+                    entry,
+                    profile.analysis.context_tokens,
+                    Some(&profile),
+                );
+            }
+            rows.push(row);
+        }
+        assert_eq!(std::fs::read(input).unwrap(), packet_bytes);
+        let out =
+            std::path::PathBuf::from(std::env::var("DOC_SUM_PDF_PREPARATION_OUTPUT").unwrap());
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(out)
+            .unwrap()
+            .write_all(
+                &serde_json::to_vec_pretty(&json!({"cases":rows,
+            "generation_calls":0,"runtime_startups":0,"tokenizer_http_calls":0,
+            "native_qualified":false,"wire_bodies_approved":false}))
+                .unwrap(),
+            )
+            .unwrap();
+        println!(
+            "PDF_PREPARATION_SAVED generation_calls=0 runtime_startups=0 native_qualified=false"
+        );
+    }
+
+    #[test]
+    fn preparation_pdf_uses_production_pages_and_rejects_changed_source() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/structured_report.pdf");
+        let bytes = std::fs::read(&path).unwrap();
+        let spec = json!({"alias":"public-pdf","path":path,"file_type":"pdf",
+            "sha256":format!("{:x}",Sha256::digest(&bytes))});
+        let (parsed, normalized, _, _) = preparation_source(&spec);
+        assert_eq!(parsed.parser_id, "pdf-extract");
+        assert_eq!(parsed.document_id, "public-pdf");
+        assert_eq!(parsed.pages.len(), 6);
+        assert_eq!(parsed.pages.len(), normalized.pages.len());
+        for (index, page) in parsed.pages.iter().enumerate() {
+            assert_eq!(page.page_number, u32::try_from(index + 1).unwrap());
+        }
+        let mut bad = spec.clone();
+        bad["sha256"] = json!("0".repeat(64));
+        assert!(std::panic::catch_unwind(|| preparation_source(&bad)).is_err());
+        let case = public_analysis_preparation_case("public-pdf-run", 32768, "general");
+        let row = analyze_preparation_row(&spec, &case, 32768, None);
+        assert_eq!(row["status"], "captured");
+        assert_eq!(row["analyzed_artifact_present"], false);
     }
 
     #[test]

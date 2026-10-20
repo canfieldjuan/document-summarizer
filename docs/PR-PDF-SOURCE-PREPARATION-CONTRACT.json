@@ -1,5 +1,5 @@
 {
-  "status": "OPERATOR_DIRECTED_OFFLINE_PROVENANCE_AND_INITIAL_ANALYZE_MEASUREMENT",
+  "status": "OFFLINE_IMPLEMENTED_BOTH_INITIAL_ANALYZE_REQUESTS_CAPTURED",
   "operator_instruction": "Let\u2019s find the original PDFs and bind them to the frozen inputs, then use production parsing to check both offline. Check the Windows rerun too.",
   "base_head": "8b5cf518120963c7f6ab36f91b861fc40cc13821",
   "inventory": {
@@ -34,15 +34,54 @@
     "Capture or record actual earlier failure for each canonical PDF; no returned/persisted analysis and all live counters zero.",
     "Focused Rust tests, format, strict Clippy; reuse required frozen gate before any eventual push."
   ],
-  "implementation_summary": "Not implemented; contract committed before code.",
-  "cold_diff_audit": "Contract-only initial commit.",
+  "implementation_summary": "Extended only existing test-module preparation_source to call unchanged production ingestion/PdfExtractParser for bound PDF specs; retained the historical text projection for old proofs. A narrow ignored offline entry exports production artifacts and uses the existing Analyze recorder after verifying the PDF/text/parsed-output binding.",
+  "cold_diff_audit": {
+    "src-tauri/src/pipeline/summary.rs": "Test-module only: shared source helper PDF branch; truthful ingested PDF metadata; private provenance/measurement entry; public six-page source/hash/typed-capture regression. Production prefix byte-identical to PR146.",
+    "docs/PR-PDF-SOURCE-PREPARATION-CONTRACT.json": "Operator-directed offline scope recorded before code; provenance, measured outcomes and remaining gates."
+  },
   "gap_audit": {
     "status": "NOT DONE",
     "remaining": [
-      "Production parse and page-by-page comparison",
-      "Verified canonical bindings",
-      "Independent initial Analyze observations for both",
-      "Regression/lint proof and any publication review"
+      "Fresh seven-owner frozen gate before publication",
+      "New exact-head CI and independent review",
+      "Initial requests only; full Analyze and native token fit are unqualified",
+      "Affected writer requests, call ceilings and live approval freezes require recomputation under a later accepted scope",
+      "All production/ready/merge/PR116 holds remain"
     ]
+  },
+  "results": {
+    "windows_rerun": "PR146 unchanged8b5cf51 run39355879700 attempt2SUCCESS; allCIgreen; intermittent startup issue147.",
+    "source_binding": {
+      "preproduction-1": {
+        "pdf_sha256": "a26124eaf586b0fe423eeede0fd264bb0fc1edf83925718c6ae035d9539cf24d",
+        "pages": 15,
+        "initial_request_characters": 4175,
+        "character_fit": true
+      },
+      "preproduction-2": {
+        "pdf_sha256": "d9c46b09a1abc5916a9b0194cd82f350800b843de998928ff1ce35df8349c67a",
+        "pages": 10,
+        "initial_request_characters": 4050,
+        "character_fit": true
+      }
+    },
+    "canonical_basis": "Hashes match original named test PDFs recorded in older corpus controls and prior app-proof inputs. The alternate second PDF parses identically but is not substituted.",
+    "page_comparison": "Complete differences saved privately. PAGE markers match production page counts; every page retains NFKC non-whitespace character counts, with reading-order/spacing/footer-placement changes. No byte-parity or semantic-fidelity claim.",
+    "claim_budgets": {
+      "preproduction-1": 9,
+      "preproduction-2": 8
+    },
+    "regression": "Fail-first PDF UTF-8 failure -> production parser fix; four focused preparation tests pass, including exact six-page preservation and tampered source rejection.",
+    "character_cap": 16000,
+    "cap_changed": false,
+    "logical_capture_stop": "ANALYZE_PREPARATION_CAPTURED",
+    "native_token_fit": "not_evaluated_offline",
+    "model_calls": 0,
+    "runtime_startups": 0,
+    "tokenizer_http": 0,
+    "delegated_native_preflights": 0,
+    "analyzed_artifact_present": false,
+    "public_report_alias": "pdf-source-preparation-20261020/report.json",
+    "public_report_sha256": "6bebef08d00a25670a380e97e9c4cb755aa793d8b675aadec86de414c2402c1d"
   }
 }
