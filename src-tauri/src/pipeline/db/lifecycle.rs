@@ -250,7 +250,9 @@ fn read_readiness(file: &mut File, identity: (u64, u64)) -> Result<String, Store
 }
 
 fn primary_is_live(primary: &File) -> Result<bool, StoreError> {
-    match primary.try_lock() {
+    // Absence probes must coexist: only the primary's exclusive lock may
+    // produce contention. An exclusive probe would impersonate that owner.
+    match primary.try_lock_shared() {
         Ok(()) => Ok(false),
         Err(TryLockError::WouldBlock) => Ok(true),
         Err(TryLockError::Error(error)) => Err(error.into()),
@@ -790,7 +792,10 @@ mod tests {
             );
             assert!(matches!(consumer.reader(), Err(StoreError::Unavailable)));
             assert!(matches!(consumer.writer(), Err(StoreError::Unavailable)));
-            assert!(matches!(Store::attach(&file.0), Err(StoreError::Unavailable)));
+            assert!(matches!(
+                Store::attach(&file.0),
+                Err(StoreError::Unavailable)
+            ));
             assert!(is_contention(&Store::initialize(&file.0).unwrap_err()));
             release_tx.send(()).unwrap();
         });

@@ -1,15 +1,13 @@
 {
   "scope": "Offline primary-readiness repair for issue #147, authorized by operator Do it; separate from held C9 stack.",
   "root_cause": {
-    "status": "hypothesis pending deterministic reproduction",
+    "status": "Confirmed by deterministic public overlap regression; historical Windows scheduling interleaving was not observed directly",
     "owner": "src-tauri/src/pipeline/db/lifecycle.rs::require_primary",
     "invariant": "Only an actual primary may make readiness probes report a live owner. Concurrent probes must not impersonate it.",
-    "suspected_defect": "A successful exclusive absence probe remains locked until its File is dropped; another probe can interpret its contention as a primary.",
-    "introducing_commits": [
-      "2819d1e7",
-      "978672a7"
-    ],
-    "historical_symptom": "Windows startup test reported desktop inherited departed primary readiness; exact OS interleaving remains unobserved."
+    "historical_symptom": "Windows startup test reported desktop inherited departed primary readiness; exact OS interleaving remains unobserved.",
+    "defect": "A successful exclusive absence probe remains locked until its File is dropped; another probe can interpret its contention as a primary.",
+    "introducing_commit": "2819d1e7",
+    "absence_error_mapping_commit": "978672a7"
   },
   "required_change_surface": [
     "lifecycle.rs probe operation and deterministic overlap tests using the same production operation and actual Store/StoreAccess readers",
@@ -33,7 +31,33 @@
     "Adjacent lifecycle, desktop_startup and StoreAccess tests; formatting; strict all-target/all-feature Clippy",
     "Native Windows lifecycle/startup/access CI, independent exact-head review before merge"
   ],
-  "implementation_summary": "Not implemented",
-  "cold_diff_audit": "Pending",
-  "gap_audit": "NOT DONE"
+  "implementation_summary": {
+    "production": "Extract one probe operation for deterministic interleaving and change its absence lock to shared; bootstrap primary acquisition remains exclusive under exclusive initialization gate.",
+    "regressions": [
+      "overlapping_absence_probe_cannot_impersonate_primary",
+      "readiness_probes_preserve_live_primary_and_release_without_authority"
+    ],
+    "removed_special_cases": "None: all readiness consumers already route through require_primary. No downstream workaround was added.",
+    "rework": "The exclusive probe was introduced by our earlier storage change 2819d1e7; 978672a7 only changed the absence error."
+  },
+  "cold_diff_audit": [
+    {
+      "file": "src-tauri/src/pipeline/db/lifecycle.rs",
+      "owner": "primary_is_live / require_primary",
+      "actual_change": "Shared absence probe; error propagation preserved; actual primary acquisition and all consumer callers unchanged.",
+      "coverage": "Deterministic overlap fails through StoreAccess.get before the lock-mode fix; passes after. Real reader/writer/attach reject absence during overlap. Live-primary positive and original startup assertion pass."
+    },
+    {
+      "file": "docs/PR-PRIMARY-READINESS-REPAIR.json",
+      "actual_change": "Record scope, origin, proof and remaining external gates."
+    }
+  ],
+  "gap_audit": {
+    "status": "NOT DONE",
+    "remaining": [
+      "Native Windows exact-head CI",
+      "Independent exact-head review; existing production/merge holds remain"
+    ],
+    "local_evidence": "Fail-first: 0 passed, 1 failed at desktop inherited departed primary readiness from another probe (exit 101); passing-after: 1 passed; adjacent db: 35 passed; desktop_startup: 3 passed; formatting passed; strict all-target/all-feature Clippy passed."
+  }
 }
