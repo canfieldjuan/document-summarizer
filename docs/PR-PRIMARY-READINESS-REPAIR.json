@@ -1,0 +1,39 @@
+{
+  "scope": "Offline primary-readiness repair for issue #147, authorized by operator Do it; separate from held C9 stack.",
+  "root_cause": {
+    "status": "hypothesis pending deterministic reproduction",
+    "owner": "src-tauri/src/pipeline/db/lifecycle.rs::require_primary",
+    "invariant": "Only an actual primary may make readiness probes report a live owner. Concurrent probes must not impersonate it.",
+    "suspected_defect": "A successful exclusive absence probe remains locked until its File is dropped; another probe can interpret its contention as a primary.",
+    "introducing_commits": [
+      "2819d1e7",
+      "978672a7"
+    ],
+    "historical_symptom": "Windows startup test reported desktop inherited departed primary readiness; exact OS interleaving remains unobserved."
+  },
+  "required_change_surface": [
+    "lifecycle.rs probe operation and deterministic overlap tests using the same production operation and actual Store/StoreAccess readers",
+    "Keep actual primary acquisition exclusive; initialization gate excludes probe overlap during acquisition",
+    "Record reproduction and adjacent lifecycle/startup/access proof in durable evidence"
+  ],
+  "explicit_non_scope": [
+    "No model calls, C9 writer or qualification changes",
+    "No DB migration, schema, dependency, public API, timeout or retry changes",
+    "No assertion weakening, suppression of OCR recovery or serialization of all readiness consumers",
+    "Issue #140 is separate unless demonstrated to share the root owner"
+  ],
+  "assumptions_blockers": [
+    "A deterministic overlap reproduces the same failure class; Windows CI must validate native lock semantics and original startup tests",
+    "Contract authorizes repair only if origin is confirmed; otherwise continue isolation"
+  ],
+  "verification_plan": [
+    "Extract the current operation without behavior changes so a test can retain its File at the real overlap point",
+    "Fail-first public regression: while the first real absence probe is held, another StoreAccess.get must reject a departed primary",
+    "Passing-after regression; live-primary positive and absent-primary mixed reader/writer/attach checks",
+    "Adjacent lifecycle, desktop_startup and StoreAccess tests; formatting; strict all-target/all-feature Clippy",
+    "Native Windows lifecycle/startup/access CI, independent exact-head review before merge"
+  ],
+  "implementation_summary": "Not implemented",
+  "cold_diff_audit": "Pending",
+  "gap_audit": "NOT DONE"
+}
