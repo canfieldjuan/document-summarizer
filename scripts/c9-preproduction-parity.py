@@ -282,17 +282,18 @@ def run_offline_baseline(args):
     return 0
 
 
-def writer_preparation_packet(path, source_packet):
+def writer_preparation_packet(path, source_packet, analyze=False):
     packet = read(path)
-    require(set(packet) == {'version', 'cases'} and type(packet['version']) is int and packet['version'] == 1,
+    require(set(packet) == {'version', 'cases'} and type(packet['version']) is int and packet['version'] == (2 if analyze else 1),
             'writer preparation packet version/fields changed')
     aliases = {row['alias'] for row in read(source_packet)['inputs']}
     cases = packet['cases']
     require(isinstance(cases, list) and len(cases) == len(aliases), 'writer preparation cases incomplete')
     seen, runs = set(), set()
+    extra = {'summary_profile', 'delivery_policy', 'expected_seed', 'context_tokens_analyze'} if analyze else set()
     for case in cases:
-        require(isinstance(case, dict) and {'alias', 'run_id'} <= set(case)
-                and set(case) <= {'alias', 'run_id', 'analyzed', 'profile', 'runtime_id'}, 'writer case fields changed')
+        require(isinstance(case, dict) and ({'alias', 'run_id'} | extra) <= set(case)
+                and set(case) <= {'alias', 'run_id', 'analyzed', 'profile', 'runtime_id'} | extra, 'writer case fields changed')
         alias, run = case['alias'], case['run_id']
         require(isinstance(alias, str) and alias in aliases and alias not in seen, 'writer source alias changed/duplicated')
         require(isinstance(run, str) and bool(run.strip()) and run not in runs, 'writer run identity missing/duplicated')
@@ -305,15 +306,59 @@ def writer_preparation_packet(path, source_packet):
                 require(isinstance(spec, dict) and set(spec) == {'path', 'sha256'}
                         and isinstance(spec['path'], str) and isinstance(spec['sha256'], str)
                         and sha(spec['path']) == spec['sha256'], 'writer archive changed: ' + field)
+        if analyze:
+            require('analyzed' not in case and 'profile' in case and 'runtime_id' in case,
+                    'Analyze preparation needs profile/runtime, never a substituted analysis')
+            require(case['summary_profile'] in ('general', 'contract') and case['delivery_policy'] is None,
+                    'Analyze preparation entry changed')
+            require(type(case['expected_seed']) is int and 0 <= case['expected_seed'] <= 2**63-1,
+                    'Analyze preparation seed invalid')
+            require(type(case['context_tokens_analyze']) is int and case['context_tokens_analyze'] > 0
+                    and case['context_tokens_analyze'] == read(case['profile']['path'])['analysis']['contextTokens'],
+                    'Analyze preparation context differs from frozen profile')
     return packet
 
 
+def validate_analyze_preparation_row(row, case):
+    require(row.get('seed') == case['expected_seed'] and type(row.get('seed')) is int
+            and row.get('summary_profile') == case['summary_profile']
+            and 'delivery_policy' in row and row['delivery_policy'] is None
+            and row.get('context_tokens_analyze') == case['context_tokens_analyze']
+            and type(row.get('context_tokens_analyze')) is int, 'Analyze entry/seed/context changed')
+    require(row.get('health') == 'not_evaluated_offline'
+            and row.get('native_token_fit') == 'not_evaluated_offline'
+            and row.get('analyzed_artifact_present') is False, 'offline Analyze evidence overstates admission')
+    requests = row['requests']
+    require(isinstance(requests, list) and type(row.get('health_calls')) is int
+            and 0 <= row['health_calls'] <= 1, 'invalid Analyze recorder observation')
+    status = row.get('status')
+    if status == 'captured':
+        require(case['summary_profile'] == 'general' and len(requests) == 1
+                and row.get('pages_request_fits') is True and row.get('health_calls') == 1
+                and row.get('stop_code') == 'ANALYZE_PREPARATION_CAPTURED'
+                and row.get('stop_stage') == 'Analyze' and row.get('stop_recoverable') is False
+                and row.get('route') == 'pages', 'invalid Analyze capture')
+    elif status == 'no_model_request':
+        require(case['summary_profile'] == 'contract' and not requests and row.get('health_calls') == 0
+                and row.get('route') == 'contract_extraction'
+                and row.get('pages_request_fits') == 'not_evaluated_no_model_route', 'invalid Contract route')
+    elif status == 'admission_rejected':
+        require(case['summary_profile'] == 'general' and not requests
+                and row.get('pages_request_fits') is False and row['health_calls'] == 1
+                and row.get('stop_code') == 'ANALYSIS_REQUEST_TOO_LARGE', 'invalid character admission result')
+    else:
+        require(status in ('stopped_before_request', 'not_attempted') and not requests
+                and row.get('pages_request_fits') == 'not_evaluated', 'unrecognized Analyze outcome')
+    require(all(r['request']['stage'] == 'Analyze' for r in requests), 'Analyze capture stage changed')
+
+
 def run_writer_preparation(args):
+    analyze = getattr(args, 'phase', 'writer-prepare') == 'analyze-prepare'
     baseline = require_offline_baseline(args.offline_baseline_receipt)
     frozen = read(args.writer_freeze)
     require(frozen == baseline['frozen_inputs'], 'writer preparation freeze differs from offline proof')
     source_packet = frozen['source_packet']['path']
-    packet = writer_preparation_packet(args.preparation, source_packet)
+    packet = writer_preparation_packet(args.preparation, source_packet, analyze)
     packet_sha = sha(args.preparation)
     source = offline_source()
     out = prepare_evidence_output(args.output)
@@ -325,7 +370,7 @@ def run_writer_preparation(args):
         DOC_SUM_WRITER_PREPARATION_OUTPUT=str(out/'requests.json'), DOC_SUM_DEPENDENCIES_INPUT=source_packet,
         DOC_SUM_OFFLINE_COUNT_INVENTORY=frozen['count_inventory']['path'],
         DOC_SUM_OFFLINE_COUNT_INVENTORY_SHA256=frozen['count_inventory']['sha256'])
-    selector = 'pipeline::summary::tests::whole_writer_prepare_frozen_requests'
+    selector = 'pipeline::summary::tests::whole_' + ('analyze' if analyze else 'writer') + '_prepare_frozen_requests'
     cmd = ['cargo', 'test', '--locked', '--all-features', '--lib', selector, '--', '--exact', '--ignored', '--nocapture', '--test-threads=1']
     with (out/'run.log').open('x') as log:
         (out/'run.log').chmod(0o600)
@@ -337,35 +382,45 @@ def run_writer_preparation(args):
     require(type(report.get('generation_calls')) is int and report['generation_calls'] == 0
             and type(report.get('runtime_startups')) is int and report['runtime_startups'] == 0
             and report.get('native_qualified') is False, 'offline preparation cannot claim live work or qualification')
+    if analyze:
+        require(type(report.get('tokenizer_http_calls')) is int and report['tokenizer_http_calls'] == 0,
+                'offline Analyze must not tokenize over HTTP')
     rows = report['cases']
     require(len(rows) == len(packet['cases']) and len({r['alias'] for r in rows}) == len(rows), 'incomplete writer report')
     cases = {r['alias']: r for r in packet['cases']}
     sources = {r['alias']:r['sha256'] for r in read(source_packet)['inputs']}
+    preparation_stopped = False
     for row in rows:
         require(row['alias'] in cases and row['run_id'] == cases[row['alias']]['run_id']
                 and row['source_sha256'] == sources[row['alias']], 'writer source/run binding changed')
         require(row.get('wire_bodies_approved') is False, 'preparation cannot approve native wire bodies')
-        require(type(row['source_units']) is int and type(row['initial_sections']) is int
-                and 0 < row['initial_sections'] <= row['source_units']
-                and len(row['requests']) == row['initial_sections']
-                and type(row['writer_completion_planning_ceiling']) is int
-                and row['writer_completion_planning_ceiling'] == 2*row['source_units']-row['initial_sections'], 'writer planning bound changed')
-        probes = row['observed_probe_request_hashes']
-        require(isinstance(probes, list) and probes and len(set(probes)) == len(probes)
-                and all(isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in probes)
-                and type(row['offline_preflights']) is int and len(probes) <= row['offline_preflights'], 'writer probe record invalid')
+        if analyze:
+            validate_analyze_preparation_row(row, cases[row['alias']])
+            require((row['status'] == 'not_attempted') == preparation_stopped,
+                    'Analyze recording must stop only after the first actual failure')
+            preparation_stopped |= row['status'] not in ('captured', 'no_model_request')
+        else:
+            require(type(row['source_units']) is int and type(row['initial_sections']) is int
+                    and 0 < row['initial_sections'] <= row['source_units']
+                    and len(row['requests']) == row['initial_sections']
+                    and type(row['writer_completion_planning_ceiling']) is int
+                    and row['writer_completion_planning_ceiling'] == 2*row['source_units']-row['initial_sections'], 'writer planning bound changed')
+            probes = row['observed_probe_request_hashes']
+            require(isinstance(probes, list) and probes and len(set(probes)) == len(probes)
+                    and all(isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in probes)
+                    and type(row['offline_preflights']) is int and len(probes) <= row['offline_preflights'], 'writer probe record invalid')
         for draft in row['requests']:
             require(isinstance(draft['request_json'], str) and digest_text(draft['request_json']) == draft['request_sha256']
                     and json.loads(draft['request_json']) == draft['request']
                     and draft['request']['seed'] == row['seed'], 'writer request bytes/seed changed')
-    require(writer_preparation_packet(args.preparation, source_packet) == packet
+    require(writer_preparation_packet(args.preparation, source_packet, analyze) == packet
             and sha(args.preparation) == packet_sha, 'writer preparation inputs changed during measurement')
     verify_frozen_inputs(frozen, baseline['baseline'])
     require(offline_source() == source, 'source changed during preparation')
-    save(out/'receipt.json', {'phase':'writer-prepare','source':source,'actual_calls':0,'runtime_startups':0,
-        'native_qualified':False,'status':'offline_plan_only','preparation_sha256':packet_sha,
+    save(out/'receipt.json', {'phase':'analyze-prepare' if analyze else 'writer-prepare','source':source,'actual_calls':0,'runtime_startups':0,
+        'native_qualified':False,'status':'offline_stopped' if preparation_stopped else 'offline_plan_only','preparation_sha256':packet_sha,
         'artifacts':{str(p.relative_to(out)):sha(p) for p in out.iterdir() if p.is_file()}})
-    print('WRITER_PREPARATION_RECEIPT ' + str(out/'receipt.json'), flush=True)
+    print(('ANALYZE' if analyze else 'WRITER') + '_PREPARATION_RECEIPT ' + str(out/'receipt.json'), flush=True)
     return 0
 
 
@@ -604,7 +659,7 @@ def summary_lane(args, source):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase', choices=['native', 'preflight', 'gateway', 'summary', 'writer-offline', 'writer-prepare', 'check-offline', 'install-offline-gate'], required=True)
+    p.add_argument('--phase', choices=['native', 'preflight', 'gateway', 'summary', 'writer-offline', 'writer-prepare', 'analyze-prepare', 'check-offline', 'install-offline-gate'], required=True)
     for key in ['packet', 'lock']:
         p.add_argument('--' + key, type=Path)
     for key in ['deployment', 'model', 'settings']:
@@ -624,7 +679,7 @@ def main():
         require_offline_baseline(args.verify)
         print('Offline baseline accepted for current source and frozen inputs')
         return 0
-    if args.phase == 'writer-prepare':
+    if args.phase in ('writer-prepare', 'analyze-prepare'):
         require(all(getattr(args, key) is not None for key in ['writer_freeze', 'preparation', 'offline_baseline_receipt', 'output']), 'writer freeze, case preparation, offline receipt and durable output required')
         return run_writer_preparation(args)
     if args.phase == 'writer-offline':

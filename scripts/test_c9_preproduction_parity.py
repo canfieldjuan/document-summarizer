@@ -423,6 +423,79 @@ class WriterPreparationTests(unittest.TestCase):
                              preparation=prep,output=root/'output')
         return args, frozen, source
 
+    def test_analyze_launcher_captures_without_claiming_live_admission(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);root.chmod(0o700);args,frozen,_=self.fixture(root)
+            args.phase='analyze-prepare'
+            args.offline_baseline_receipt.write_text('{}')
+            profile=root/'profile.json';profile.write_text(json.dumps({'analysis':{'contextTokens':32768}}))
+            packet={'version':2,'cases':[{'alias':'public-doc','run_id':'public-run',
+                'profile':{'path':str(profile),'sha256':parity.sha(profile)},
+                'runtime_id':'llama.cpp-qwen-gguf','summary_profile':'general',
+                'delivery_policy':None,'expected_seed':7,'context_tokens_analyze':32768}]}
+            args.preparation.write_text(json.dumps(packet))
+            request={'stage':'Analyze','ordinal':0,'seed':7,'system_prompt':'public',
+                     'user_prompt':'public','max_output_tokens':2048,'output_format':'Text'}
+            encoded=json.dumps(request)
+            row={'alias':'public-doc','source_sha256':'source-hash','run_id':'public-run',
+                 'seed':7,'context_tokens_analyze':32768,'summary_profile':'general','delivery_policy':None,
+                 'status':'captured','stop_code':'ANALYZE_PREPARATION_CAPTURED',
+                 'stop_stage':'Analyze','stop_recoverable':False,'route':'pages',
+                 'health':'not_evaluated_offline','health_calls':1,'pages_request_fits':True,
+                 'native_token_fit':'not_evaluated_offline','wire_bodies_approved':False,
+                 'analyzed_artifact_present':False,'requests':[{'request':request,
+                 'request_json':encoded,'request_sha256':parity.digest_text(encoded)}]}
+            report={'generation_calls':0,'runtime_startups':0,'tokenizer_http_calls':0,
+                    'native_qualified':False,'cases':[row]}
+            def run(command, **kwargs):
+                self.assertIn('pipeline::summary::tests::whole_analyze_prepare_frozen_requests',command)
+                self.assertNotIn('DOC_SUM_QUALIFICATION_GGUF',kwargs['env'])
+                Path(kwargs['env']['DOC_SUM_WRITER_PREPARATION_OUTPUT']).write_text(json.dumps(report))
+                kwargs['stdout'].write('test result: ok. 1 passed; 0 failed; 0 ignored;\n')
+                return SimpleNamespace(returncode=0)
+            with mock.patch.object(parity,'require_offline_baseline',return_value={'frozen_inputs':frozen,'baseline':{}}), \
+                    mock.patch.object(parity,'offline_source',return_value={'files':{}}), \
+                    mock.patch.object(parity,'verify_frozen_inputs'), \
+                    mock.patch.object(parity,'EVIDENCE_ROOTS',(root,)), \
+                    mock.patch.object(parity,'http',side_effect=AssertionError('network forbidden')), \
+                    mock.patch.object(parity.subprocess,'run',side_effect=run):
+                self.assertEqual(parity.run_writer_preparation(args),0)
+                receipt=parity.read(args.output/'receipt.json')
+                self.assertEqual(receipt['phase'],'analyze-prepare')
+                for key,bad in [('health','passed'),('native_token_fit',True),
+                                ('wire_bodies_approved',True),('analyzed_artifact_present',True),
+                                ('seed',0),('context_tokens_analyze',32767),('summary_profile','contract'),
+                                ('pages_request_fits',False)]:
+                    before=row[key];row[key]=bad;args.output=root/('bad-'+key)
+                    with self.subTest(key=key),self.assertRaises(ValueError):
+                        parity.run_writer_preparation(args)
+                    self.assertFalse((args.output/'receipt.json').exists());row[key]=before
+
+    def test_analyze_packet_entry_boundaries(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);args,_,source=self.fixture(root)
+            profile=root/'profile.json';profile.write_text(json.dumps({'analysis':{'contextTokens':32768}}))
+            case={'alias':'public-doc','run_id':'public-run','profile':{'path':str(profile),'sha256':parity.sha(profile)},
+                  'runtime_id':'llama.cpp-qwen-gguf','summary_profile':'general','delivery_policy':None,
+                  'expected_seed':0,'context_tokens_analyze':32768}
+            good={'version':2,'cases':[case]}
+            args.preparation.write_text(json.dumps(good))
+            parity.writer_preparation_packet(args.preparation,source,True)
+            variants=[]
+            for key in ['summary_profile','delivery_policy','expected_seed','context_tokens_analyze','profile','runtime_id']:
+                bad=copy.deepcopy(good);del bad['cases'][0][key];variants.append(bad)
+            for key,values in [('expected_seed',[False,'0',-1,2**63,None]),
+                               ('context_tokens_analyze',[False,0,32767,32769,'32768']),
+                               ('delivery_policy',[False,{},'connect']),('summary_profile',['',False,'story'])]:
+                for value in values:
+                    bad=copy.deepcopy(good);bad['cases'][0][key]=value;variants.append(bad)
+            for bad in variants:
+                args.preparation.write_text(json.dumps(bad))
+                with self.subTest(value=bad),self.assertRaises(ValueError):
+                    parity.writer_preparation_packet(args.preparation,source,True)
+
     def test_packet_boundaries_and_profile_tamper(self):
         import json
         with tempfile.TemporaryDirectory() as tmp:
