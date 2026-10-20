@@ -1,0 +1,218 @@
+{
+  "status": "ACCEPTED_OFFLINE_ONLY_NOT_IMPLEMENTED",
+  "title": "Prepare the existing Analyze requests for the frozen whole-writer inputs",
+  "source_head": "a1397fb1e1e30b19aee11f63a3ecdd861f143890",
+  "inventory": {
+    "recovery_report_sha256": "67dbb181267dcc15e6cdec4e74913ed96c5e911eca9cf20ec9afca69e549f6ec",
+    "successful_same_input_native_parity": "native-message-boundary-repair-20261007/result-summary.json; two saved outputs byte-equal; launch/prompt/completion owner equality recovered separately",
+    "runtime_baseline": "runtime-baseline-recovery-20261019/report.json plus model-availability-correction.json; current read-write mount availability recorded in session ledger",
+    "prior_analyze_artifacts": {
+      "receipt_sha256": "c89696054826ac517ead6273e05fa35d26e859eda4416289fc5284f833ed3397",
+      "overall_passed": false,
+      "overall_stop": "QUALIFICATION_PREFLIGHT_CEILING",
+      "saved_analyze_request_count": 10,
+      "request_artifact_sha256": "4770fc3ce9a50a6d83d66ff926d8d35a55e35de238cd291ea9ee78be0cf55d22",
+      "limitation": "Prior combined run failed at its historical preflight ceiling. Saved Analyze artifacts are evidence inventory, not an overall qualification PASS or evidence for these two different frozen source identities."
+    },
+    "profile_sha256": "dc7ba5423d0bd9b0411e3fab7d2c7577683832f4ea3e46a72794c96dcba7332d",
+    "frozen_writer_source_and_run_ids": "Existing source-packet and preparation-recovered-profile.json bindings; unchanged",
+    "baseline_difference": "Original freeform runner had no Analyze stage. Current whole-document policy requires source-bound Analyze ledger claims. New inputs differ from the prior Analyze fixture; no claim those artifacts are reusable.",
+    "existing_adapter_audit": {
+      "archive_alias": "native-stage-qualification-20261009/source/src-tauri/src/pipeline/summary/comparisons/parity.rs",
+      "adapter_sha256": "25c7d72333486298bdfca5e4e696c06202f90793dde970a6d6f9984c1211e33b",
+      "owners_examined": [
+        "FreshStageRecording",
+        "StageWireRecording",
+        "native_stage_qualification_once",
+        "current comparisons/parity.rs::Recording",
+        "current summary.rs preparation recorder",
+        "native_qualification_supervisor.py"
+      ],
+      "reuse": "Reuse the existing pure preparation recorder/freeze/output owners and the known no-live runtime pattern; reuse supervisor/Recording only in a separately accepted live scope.",
+      "why_not_invoke_old_runner": "The archived entry unconditionally creates a native runtime, runs C9 and then fresh Analyze/Synthesize on its structured fixture. It has no offline Analyze-only mode for the two frozen sources. Its combined run already stopped at a preflight ceiling and has no renewed budget.",
+      "analyze_source_comparison": {
+        "current_pages_owner_sha256": "ef824e5a53ac34eeeaf57bee2109e69d6ece9c3b4eab85836e2bda18f83341a7",
+        "archived_pages_owner_exists": true,
+        "archived_pages_owner_sha256": "ef824e5a53ac34eeeaf57bee2109e69d6ece9c3b4eab85836e2bda18f83341a7",
+        "pages_owner_byte_equal": true
+      }
+    },
+    "model_and_request_pins": {
+      "model_sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+      "server_sha256": "0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099",
+      "profile": "full-qwen35-9b-q4km-v1",
+      "context": 32768,
+      "tokenizer": "qwen35-pre-cc5fb918-v2",
+      "thinking": "off",
+      "slots": 1,
+      "temperature": 0,
+      "seed": "Call generation_seed_for_run(frozen run_id), never TEST_GENERATION_SEED or a historical default; record and assert each value.",
+      "Analyze_response_allowance": 2048,
+      "prompt_schema": "unchanged pages.rs selection and paraphrase owners; first actual request is the output of this offline slice",
+      "library_pins": "existing model_settings.rs::JACK_LLAMA_CPP_LIBRARIES; availability/pins reconciled in runtime-baseline-recovery-20261019"
+    },
+    "departure_list": [
+      "Inputs change from earlier structured fixture to the two frozen whole-text source identities (one normalized page each).",
+      "Mode changes from combined live C9/Analyze/Synthesize invocation to zero-dispatch initial Analyze request capture.",
+      "No app or model behavior change; every new request fingerprint/admission result is reported rather than claimed equal to a different fixture."
+    ],
+    "frozen_production_entry_context": {
+      "source": "Qualification entry declares General/None to match the General-only whole-writer policy and analyze_chunked_document_controlled forwarding None. These values are prospective qualification inputs, not claimed recovered DB metadata.",
+      "summary_profile": "General",
+      "delivery_policy": null,
+      "context_tokens_analyze": 32768,
+      "context_binding": "Read the existing frozen profile/count inventory and require agreement before capture. Preserve the current profile/content fingerprints; record the actual context_tokens(Analyze).",
+      "case_bindings": [
+        {
+          "alias": "preproduction-1",
+          "run_id": "run-writer-qualification-7304775bdd4f5be41103aa7c7e06c020",
+          "expected_seed_from_existing_production_owner_capture": 2125763738245049619
+        },
+        {
+          "alias": "preproduction-2",
+          "run_id": "run-writer-qualification-c454dc8f2ad50b9e1490c500b866994d",
+          "expected_seed_from_existing_production_owner_capture": 2706044255414516996
+        }
+      ],
+      "mismatch_policy": "Any supplied/live run profile or delivery policy differing from the frozen qualification entry stops before dispatch. Never infer SummaryProfile from a document title or from ModelProfileSnapshot.presetId."
+    }
+  },
+  "root_cause": "Whole-writer stage entry requires a genuine analysis bound to each frozen source, and recovery found no matching artifact. Existing preparation exports only Synthesize requests. Before any generation request, an offline capture must identify the production logical ModelRequest with its actual run-derived seed, SummaryProfile, delivery_policy and frozen Analyze context. Character-fit evaluation is separate from unperformed health/native-token evaluation. The capture cannot freeze or approve a native wire body.",
+  "required_change_surface": [
+    {
+      "path": "src-tauri/src/pipeline/summary.rs existing tests module",
+      "change": "Extend the existing test-only preparation through the production Analyze entry/routing owner, with explicit frozen SummaryProfile, delivery_policy, run ID, run-derived seed and Analyze context. Reuse current normalized/chunked source bindings. For the General route, answer health offline and capture the first logical ModelRequest at generate_with_control; return a typed preparation ModelRuntimeFailure before any dispatch. Preserve writer mode startup guards. For Contract, record the existing deterministic no-model route without fabricating a model request or analysis artifact. No production routing/prompt/admission logic may be copied or changed."
+    },
+    {
+      "path": "scripts/c9-preproduction-parity.py and existing Python tests",
+      "change": "Expose the offline Analyze preparation via the existing source/input/receipt/output validation owner. Share lifecycle and freeze logic with writer preparation; do not copy validators or add a second planning owner."
+    }
+  ],
+  "explicit_non_scope": [
+    "No production Analyze/writer/Verify behavior, prompt, schema, sampler, seed, caps, model, settings or framing changes.",
+    "No server/GPU/tokenizer HTTP or generation. No native stage completion or qualification claim.",
+    "No fabricated or rebound analysis, no Analyze bypass, no benchmark facts/DV labels, no new parsing/sampling or page splitting.",
+    "No publication into frozen132/141/143 branches, production activation, ready transition or merge."
+  ],
+  "assumptions_blockers": [
+    "Direct operator acceptance before code/test edits; independent contract review first.",
+    "For the frozen General/None entry, obtain the initial logical Analyze request through the unchanged production owner, or record its exact existing failure. Capture is not live health/native admission proof. Any failure stops this slice; no fallback or wider scope.",
+    "Paraphrase and repair requests depend on generated selection/text. They are not frozen by this slice; native wire bodies are neither constructed nor approved.",
+    "The subsequent live contract must supply finite budget, per-request/response-dependent approval policy, effective-settings evidence and explicit before-send gates. No live authorization is inferred here.",
+    "If archived Analyze source differs, inventory the differences before implementing the recorder; do not label a new projection as prior-request parity."
+  ],
+  "verification_plan": [
+    "Reuse current mandatory seven-owner frozen baseline receipt; require current source binding.",
+    "Use the real production entry/routing owner and pages::analyze. Capture its actual first logical ModelRequest or exact character-admission error. Do not reconstruct a request builder or profile routing rule in the adapter.",
+    "Boundary probes: distinct frozen run IDs must bind the actual generation_seed_for_run output; no TEST_GENERATION_SEED/default. Bind and record SummaryProfile, delivery_policy and context. Changed/missing source/profile/count/run/entry bindings stop; Contract follows the deterministic no-model route.",
+    "General capture must answer health offline and label it not_evaluated_offline. Assert native_token_fit remains not_evaluated_offline and wire_bodies_approved=false. The stop is a typed ModelRuntimeFailure, not a panic; assert no returned or persisted AnalyzedDocument.",
+    "Preserve complete writer initial requests, probe hashes and existing stage-entry missing-analysis result. Reuse existing writer preparation tests, formatter/lint and required offline gate for any eventual source change.",
+    "Negative evidence labels must reject any health=passed, native token fit=passed, wire-approved claim, returned ModelResponse/AnalyzedDocument or hidden real runtime/startup/tokenizer contact from offline preparation. Preserve typed character-fit errors and the no-model Contract control."
+  ],
+  "future_live_budget_planning_only": {
+    "pages": {
+      "preproduction-1": 1,
+      "preproduction-2": 1
+    },
+    "maximum_completions_per_page": 3,
+    "derivation": "One quote selection plus at most two paraphrase attempts (for attempt in 0..=1), with no other generation in pages::analyze. Both frozen normalized inputs have one page.",
+    "maximum_total_completions": 6,
+    "normal_no_repair_total": 4,
+    "live_authorization": 0,
+    "scope": "Code-derived ceiling only; no admission claim and no launch-ready budget."
+  },
+  "live_authorization": {
+    "completions": 0,
+    "delegated_native_preflights": 0,
+    "tokenizer_http": 0,
+    "server_startups": 0
+  },
+  "implementation_summary": "Contract proposal only; no implementation, no repository edit.",
+  "cold_diff_audit": "Working checkout remains unchanged. Evidence and proposal live outside worktree; original reports preserved.",
+  "gap_audit": {
+    "status": "NOT DONE",
+    "remaining": [
+      "Independent contract review",
+      "Direct operator acceptance before implementation",
+      "Offline logical Analyze request capture/pages character-fit evidence; native health and native token admission intentionally remain unmeasured.",
+      "Separate accepted live scope/budget before creating genuine Analyze artifacts",
+      "Whole-writer native generation and independent fidelity qualification remain unperformed"
+    ]
+  },
+  "revision": {
+    "version": 3,
+    "supersedes_sha256": "1b1f685a357c6e574f086cb9c5137c37baea786c7cc473eb5125e568f2af023d",
+    "reason": "Complete the production execution context and distinguish the logical request/character gate from health/native admission; oversight R1-R4 in comment6280632924.",
+    "operator_acceptance": "Required after independent review; not accepted or implemented."
+  },
+  "capture_contract": {
+    "production_entry": {
+      "routing_owner": "summary.rs::analyze_chunked_document_controlled_with_delivery",
+      "seed_owner": "summary.rs::generation_seed_for_run",
+      "General_route": "analyze_with_delivery/pages::analyze with the frozen delivery policy, production run seed, and existing normalized/chunked sources.",
+      "Contract_control": "Exercise existing production profile routing, record status=no_model_request/route=contract_extraction and zero recorder generation/health calls. Do not call pages::analyze or persist analysis just to produce an offline model request.",
+      "entry_metadata_fields": [
+        "SummaryProfile",
+        "delivery_policy",
+        "run_id",
+        "seed",
+        "context_tokens_analyze"
+      ]
+    },
+    "health": {
+      "result_label": "not_evaluated_offline",
+      "implementation": "Analyze capture mode returns Ok(()) from its offline health stub solely to reach the logical request boundary; count and report the call. It must not contact a server, construct a native runtime, or claim a live health pass. Existing writer-only panic-on-startup behavior remains unchanged.",
+      "forbidden_claim": "health=passed"
+    },
+    "logical_request": {
+      "capture_boundary": "ModelRuntime::generate_with_control receives the existing pages.rs ModelRequest. No ModelResponse is returned.",
+      "identity_owner": "ModelRequest::integrity_sha256(), using its existing serde_json::to_vec(self) serialization; do not add a second fingerprint algorithm.",
+      "record_fields": [
+        "complete serialized logical ModelRequest",
+        "integrity_sha256",
+        "stage",
+        "ordinal",
+        "seed",
+        "schema",
+        "max_output_tokens",
+        "entry metadata and source/profile/count-inventory fingerprints"
+      ],
+      "wire_bodies_approved": false,
+      "native_wire_body": "not_constructed_offline; prompt tokens, decoder serialization and native payload are later-owner work"
+    },
+    "admission_labels": {
+      "pages_request_fits": "true only when unchanged pages.rs character-fit gate was traversed to the recorder; false for ANALYSIS_REQUEST_TOO_LARGE; not_evaluated_no_model_route for Contract. Other earlier failures remain explicit, with no assumed fit.",
+      "native_token_fit": "not_evaluated_offline",
+      "tokenizer_http_calls": 0,
+      "source": "pages.rs::request_fits is a character check; llama_cpp.rs::generate_with_control tokenizes and checks native token fit later."
+    },
+    "recording_stop": {
+      "type": "ModelRuntimeFailure",
+      "code": "ANALYZE_PREPARATION_CAPTURED",
+      "recoverable": false,
+      "propagation": "pages::generate uses runtime_pipeline_failure; retain Analyze stage and the exact preparation code through the Result path. A panic is not a successful recording stop.",
+      "assertions": [
+        "General capture result is Err with the typed preparation code and Analyze stage",
+        "exactly the first request is captured, with the production seed/context/entry metadata",
+        "no ModelResponse is returned and no AnalyzedDocument is returned or persisted",
+        "when using an ephemeral production entry database, its analyzed artifact remains absent",
+        "admission failure before capture reports the actual production failure with zero captured requests",
+        "Contract control produces no model request or synthetic analysis"
+      ]
+    }
+  },
+  "review_response": {
+    "R1": "Explicit production seed owner and per-case expected values, captured from existing production-owned writer preparation; acceptance requires recomputation by the same owner.",
+    "R2": "Explicit General/None qualification entry; match production routing/arguments; Contract no-model control.",
+    "R3": "Analyze-specific offline health answer and neutral label; preserve writer startup guard.",
+    "R4": "Separate character gate/native-token gate; logical integrity hash only; root wording corrected.",
+    "additional": "Record frozen Analyze context; typed Result stop; assert no returned/persisted AnalyzedDocument.",
+    "evidence": "All source inspection at a1397fb; no implementation or code test changed."
+  },
+  "operator_acceptance": {
+    "message": "I accept the revised offline Analyze-preparation contract. Let\u2019s implement it.",
+    "accepted_contract_sha256": "7f186af77d95c152ed57101bbdb0266a7a81488f9757b6b140d0016580e37116",
+    "scope": "Offline Analyze preparation only; zero live authorization",
+    "recorded_at": "2026-10-20T01:35:11.728716+00:00"
+  }
+}
