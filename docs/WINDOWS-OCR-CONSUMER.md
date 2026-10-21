@@ -81,3 +81,24 @@ No model, transport schema, capacity, prompt, invoice, packaging or background
 changes. Functional foreground proof is DONE; packaging and independent review,
 CI and merge remain NOT DONE. Durable evidence alias:
 `windows-ocr-consumer-evidence-v1.zip` (digest posted with the PR).
+
+
+## Review reconciliation (2026-10-21)
+
+Preserve Unix's existing `InvalidOutput` assertion in snapshot failure; only
+Windows may report its native `Io` refusal. The real-provider test must call
+production discovery so `.tmp`, non-registration files, malformed registrations
+and dead endpoints are treated exactly as the running consumer treats them.
+No second admission implementation belongs in the native proof.
+
+The Windows cap counts every directory child to bound enumeration, not only JSON
+candidates. A directory enumeration error, unsafe directory or cap overflow aborts
+the discovery call, including v2 fallback. Individual invalid registration files
+and stale endpoints are skipped by the existing admission/probe helpers. This
+is intentionally fail-closed; it differs from Unix's unreadable-entry skipping.
+Recovery currently reduces discovery failure to provider-unavailable, and the
+Windows derived-file writer still requires its existing protected private ACL
+when replacing an existing file. Those diagnostics and backup-restore edge cases
+remain non-blocking follow-up in reviewer note 151, not additional port slices.
+
+Accepted as test fidelity repair and explicit disclosure of the existing policy.
