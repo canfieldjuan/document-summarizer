@@ -1,7 +1,7 @@
 mod streamed;
 
 use crate::connect::contracts::{CapabilityRef, InputArtifact, JobState, APP_ID};
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use crate::connect::v2::{AppManifest, RuntimeRegistration};
 use crate::connect::v2::{
     ErrorEnvelope, JobRequest, JobStatus, OutputArtifact, OCR_INPUT_MEDIA_TYPE,
@@ -31,10 +31,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use uuid::{Variant, Version};
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const OCR_APP_ID: &str = "document-ocr";
 const OCR_CAPABILITY_ID: &str = "document.ocr";
 const OCR_CAPABILITY_VERSION: &str = "1.0";
@@ -43,9 +43,9 @@ const TEXT_MEDIA_TYPE: &str = "text/plain";
 const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PDF_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_REGISTRATION_BYTES: u64 = 16 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_STATUS_BYTES: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1142,7 +1142,22 @@ fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), 
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), OcrConsumerError> {
+    use crate::connect::windows_storage;
+    let (expected, bytes) = validate_retained_derived(app_data_dir, handoff)?;
+    let directory = expected.parent().expect("derived path has a parent");
+    windows_storage::ensure_private_directory(directory, app_data_dir)?;
+    let maximum = if saved_protocol(handoff)? == 3 {
+        streamed::MAX_PDF
+    } else {
+        MAX_PDF_BYTES
+    };
+    windows_storage::atomic_replace_bytes(&expected, bytes, maximum as u64, false, app_data_dir)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn materialize_derived(app_data_dir: &Path, handoff: &OcrHandoff) -> Result<(), OcrConsumerError> {
     validate_retained_derived(app_data_dir, handoff)?;
     Err(OcrConsumerError::Discovery(
@@ -1186,7 +1201,7 @@ fn discover_selected_provider(
         .ok_or_else(|| OcrConsumerError::ProviderUnavailable(instance_id.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
     Err(OcrConsumerError::Discovery(
         "direct OCR discovery is not enabled on this platform".to_string(),
@@ -1234,13 +1249,7 @@ fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
                 "provider directory is not owner-private".to_string(),
             ));
         }
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(DISCOVERY_TIMEOUT)
-            .timeout(DISCOVERY_TIMEOUT)
-            .build()
-            .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?;
+        let client = discovery_client()?;
         for entry in fs::read_dir(&directory)
             .map_err(|error| OcrConsumerError::Discovery(error.to_string()))?
         {
@@ -1251,54 +1260,82 @@ fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
             let Some(registration) = read_registration(&path, owner_uid, protocol) else {
                 continue;
             };
-            if registration.app_id != OCR_APP_ID
-                || registration.protocol_version != protocol
-                || registration.transport.kind != format!("http-loopback-v{protocol}")
-                || registration.auth.scheme != "bearer"
-                || registration.auth.token.is_empty()
-                || !valid_uuid_v4(&registration.instance_id)
-                || (protocol == 3 && !streamed::canonical_uuid(&registration.instance_id))
-                || validate_base_url(&registration.transport.base_url).is_none()
-            {
-                continue;
-            }
-            let response = match client
-                .get(
-                    endpoint(
-                        &registration.transport.base_url,
-                        &format!("v{protocol}/manifest"),
-                    )
-                    .map_err(map_transport)?,
-                )
-                .bearer_auth(&registration.auth.token)
-                .send()
-            {
-                Ok(response) if response.status() == StatusCode::OK => response,
-                _ => continue,
-            };
-            let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            };
-            let manifest: AppManifest = match if protocol == 3 {
-                streamed::decode_metadata(&bytes, MAX_MANIFEST_BYTES as usize).ok()
-            } else {
-                serde_json::from_slice(&bytes).ok()
-            } {
-                Some(manifest) => manifest,
-                None => continue,
-            };
-            if valid_ocr_manifest(&manifest, &registration) {
-                providers.push(LiveOcrProvider {
-                    app_id: registration.app_id,
-                    instance_id: registration.instance_id,
-                    base_url: registration.transport.base_url,
-                    token: registration.auth.token,
-                    protocol_version: protocol,
-                });
+            if let Some(provider) = probe_registration(&client, registration, protocol)? {
+                providers.push(provider);
             }
         }
     }
+    Ok(unique_providers(providers))
+}
+
+#[cfg(any(unix, windows))]
+fn discovery_client() -> Result<Client, OcrConsumerError> {
+    Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(DISCOVERY_TIMEOUT)
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|error| OcrConsumerError::Discovery(error.to_string()))
+}
+
+#[cfg(any(unix, windows))]
+fn probe_registration(
+    client: &Client,
+    registration: RuntimeRegistration,
+    protocol: u32,
+) -> Result<Option<LiveOcrProvider>, OcrConsumerError> {
+    if registration.app_id != OCR_APP_ID
+        || registration.protocol_version != protocol
+        || registration.transport.kind != format!("http-loopback-v{protocol}")
+        || registration.auth.scheme != "bearer"
+        || registration.auth.token.is_empty()
+        || !valid_uuid_v4(&registration.instance_id)
+        || (protocol == 3 && !streamed::canonical_uuid(&registration.instance_id))
+        || validate_base_url(&registration.transport.base_url).is_none()
+    {
+        return Ok(None);
+    }
+    let response = match client
+        .get(
+            endpoint(
+                &registration.transport.base_url,
+                &format!("v{protocol}/manifest"),
+            )
+            .map_err(map_transport)?,
+        )
+        .bearer_auth(&registration.auth.token)
+        .send()
+    {
+        Ok(response) if response.status() == StatusCode::OK => response,
+        _ => return Ok(None),
+    };
+    let bytes = match read_bounded_response(response, MAX_MANIFEST_BYTES) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    let manifest: AppManifest = match if protocol == 3 {
+        streamed::decode_metadata(&bytes, MAX_MANIFEST_BYTES as usize).ok()
+    } else {
+        serde_json::from_slice(&bytes).ok()
+    } {
+        Some(manifest) => manifest,
+        None => return Ok(None),
+    };
+    if valid_ocr_manifest(&manifest, &registration) {
+        return Ok(Some(LiveOcrProvider {
+            app_id: registration.app_id,
+            instance_id: registration.instance_id,
+            base_url: registration.transport.base_url,
+            token: registration.auth.token,
+            protocol_version: protocol,
+        }));
+    }
+    Ok(None)
+}
+
+#[cfg(any(unix, windows))]
+fn unique_providers(mut providers: Vec<LiveOcrProvider>) -> Vec<LiveOcrProvider> {
     providers.sort_by(|left, right| {
         left.instance_id
             .cmp(&right.instance_id)
@@ -1307,7 +1344,88 @@ fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
     providers.dedup_by(|left, right| {
         left.instance_id == right.instance_id && left.protocol_version == right.protocol_version
     });
-    Ok(providers)
+    providers
+}
+
+#[cfg(windows)]
+fn discover_providers() -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
+    use crate::connect::windows_storage;
+    let root = windows_storage::local_app_data_root(std::env::var_os("LOCALAPPDATA"))?;
+    discover_windows_providers(&root)
+}
+
+#[cfg(windows)]
+fn discover_windows_providers(root: &Path) -> Result<Vec<LiveOcrProvider>, OcrConsumerError> {
+    use crate::connect::windows_storage;
+    let client = discovery_client()?;
+    let mut providers = Vec::new();
+    for protocol in [3, 2] {
+        let directory = root
+            .join(windows_storage::LOCAL_CONNECT_DIRECTORY)
+            .join(format!("runtime/v{protocol}/providers"));
+        if !windows_storage::path_entry_exists(&directory)? {
+            continue;
+        }
+        windows_storage::validate_private_directory(&directory, root)?;
+        for path in windows_registration_candidates(&directory)? {
+            let Some(registration) = read_windows_registration(&path, root, protocol) else {
+                continue;
+            };
+            if let Some(provider) = probe_registration(&client, registration, protocol)? {
+                providers.push(provider);
+            }
+        }
+    }
+    Ok(unique_providers(providers))
+}
+
+#[cfg(windows)]
+fn windows_registration_candidates(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    for (index, entry) in fs::read_dir(directory)?.enumerate() {
+        let entry = entry?;
+        if index == 256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows provider directory exceeds 256 entries",
+            ));
+        }
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+        {
+            candidates.push(path);
+        }
+    }
+    Ok(candidates)
+}
+
+#[cfg(windows)]
+fn read_windows_registration(
+    path: &Path,
+    root: &Path,
+    protocol: u32,
+) -> Option<RuntimeRegistration> {
+    use crate::connect::windows_storage;
+    let bytes =
+        windows_storage::read_bounded_inherited_private_file(path, MAX_REGISTRATION_BYTES, root)
+            .ok()?;
+    let registration: RuntimeRegistration = decode_registration(&bytes, protocol)?;
+    let expected = format!(
+        "local-connect-v{protocol}-{}.json",
+        registration.instance_id
+    );
+    (path.file_name()? == std::ffi::OsStr::new(&expected)).then_some(registration)
+}
+
+#[cfg(any(unix, windows))]
+fn decode_registration(bytes: &[u8], protocol: u32) -> Option<RuntimeRegistration> {
+    if protocol == 3 {
+        streamed::decode_metadata(bytes, MAX_REGISTRATION_BYTES as usize).ok()
+    } else {
+        serde_json::from_slice(bytes).ok()
+    }
 }
 
 #[cfg(unix)]
@@ -1338,14 +1456,10 @@ fn read_registration(path: &Path, owner_uid: u32, protocol: u32) -> Option<Runti
     if bytes.len() as u64 > MAX_REGISTRATION_BYTES {
         return None;
     }
-    if protocol == 3 {
-        streamed::decode_metadata(&bytes, MAX_REGISTRATION_BYTES as usize).ok()
-    } else {
-        serde_json::from_slice(&bytes).ok()
-    }
+    decode_registration(&bytes, protocol)
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn valid_ocr_manifest(manifest: &AppManifest, registration: &RuntimeRegistration) -> bool {
     if capability_version(manifest.protocol_version).is_none()
         || manifest.protocol_version != registration.protocol_version
@@ -1392,7 +1506,7 @@ fn validate_base_url(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn valid_uuid_v4(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| {
         uuid.get_version() == Some(Version::Random) && uuid.get_variant() == Variant::RFC4122
@@ -1403,9 +1517,9 @@ fn valid_uuid_v4(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::connect::contracts::AppDescription;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use crate::connect::contracts::{ArtifactProvenance, ProviderRef};
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use crate::connect::v2::JobResult;
     use crate::connect::v2::{PROTOCOL_VERSION, TRANSPORT_KIND};
     use crate::pipeline::contracts::{
@@ -1616,7 +1730,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn completed_status(handoff: &OcrHandoff) -> JobStatus {
         let pdf = include_bytes!("../../tests/fixtures/ocr_tagged.pdf").to_vec();
         let text = canonical_tagged_ocr_text(&pdf).unwrap();
@@ -1793,6 +1907,266 @@ mod tests {
                 "cancelled during status polling".to_string(),
             ))
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_registration_admission_checks_private_identity_and_size_boundaries() {
+        use crate::connect::windows_storage;
+        let root = TempDir::new().unwrap();
+        assert!(discover_windows_providers(root.path()).unwrap().is_empty());
+        for protocol in [2, 3] {
+            let directory = root
+                .path()
+                .join(format!("LocalConnect/runtime/v{protocol}/providers"));
+            windows_storage::ensure_private_directory(&directory, root.path()).unwrap();
+            let id = Uuid::new_v4().to_string();
+            let path = directory.join(format!("local-connect-v{protocol}-{id}.json"));
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "protocol_version": protocol, "instance_id": id,
+                "app_id": OCR_APP_ID, "pid": 7, "started_at": Utc::now(),
+                "transport": {"kind": format!("http-loopback-v{protocol}"), "base_url": "http://127.0.0.1:4545/"},
+                "auth": {"scheme": "bearer", "token": "test-token"}
+            })).unwrap();
+            for length in [
+                bytes.len(),
+                MAX_REGISTRATION_BYTES as usize - 1,
+                MAX_REGISTRATION_BYTES as usize,
+            ] {
+                let mut padded = bytes.clone();
+                padded.resize(length, b' ');
+                windows_storage::atomic_replace_bytes(
+                    &path,
+                    &padded,
+                    MAX_REGISTRATION_BYTES + 1,
+                    false,
+                    root.path(),
+                )
+                .unwrap();
+                assert_eq!(
+                    read_windows_registration(&path, root.path(), protocol)
+                        .unwrap()
+                        .instance_id,
+                    id
+                );
+            }
+            let alias = directory.join("wrong-identity.json");
+            windows_storage::atomic_replace_bytes(
+                &alias,
+                &bytes,
+                MAX_REGISTRATION_BYTES,
+                false,
+                root.path(),
+            )
+            .unwrap();
+            assert!(read_windows_registration(&alias, root.path(), protocol).is_none());
+            for invalid in [
+                Vec::new(),
+                b"{}".to_vec(),
+                b"false".to_vec(),
+                b"null".to_vec(),
+                vec![b' '; MAX_REGISTRATION_BYTES as usize + 1],
+            ] {
+                windows_storage::atomic_replace_bytes(
+                    &path,
+                    &invalid,
+                    MAX_REGISTRATION_BYTES + 1,
+                    true,
+                    root.path(),
+                )
+                .unwrap();
+                assert!(read_windows_registration(&path, root.path(), protocol).is_none());
+            }
+            windows_storage::atomic_replace_bytes(
+                &path,
+                &bytes,
+                MAX_REGISTRATION_BYTES,
+                false,
+                root.path(),
+            )
+            .unwrap();
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(windows_storage::read_bounded_regular_file(
+                &path,
+                MAX_REGISTRATION_BYTES,
+                false,
+                Some(root.path())
+            )
+            .is_err());
+            assert!(read_windows_registration(&path, root.path(), protocol).is_some());
+            let result = std::process::Command::new("icacls")
+                .arg(&path)
+                .args(["/grant", "*S-1-1-0:R"])
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            assert!(read_windows_registration(&path, root.path(), protocol).is_none());
+        }
+        let target = TempDir::new().unwrap();
+        let redirect = TempDir::new().unwrap();
+        let junction = redirect.path().join("LocalConnect");
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(root.path().join("LocalConnect"))
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(discover_windows_providers(redirect.path()).is_err());
+        assert!(discover_windows_providers(target.path())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_discovery_counts_every_child_before_probing() {
+        let root = TempDir::new().unwrap();
+        assert!(windows_registration_candidates(root.path())
+            .unwrap()
+            .is_empty());
+        fs::write(root.path().join("candidate.JsOn"), b"{}").unwrap();
+        assert_eq!(
+            windows_registration_candidates(root.path()).unwrap().len(),
+            1
+        );
+        for index in 1..256 {
+            fs::write(root.path().join(format!("{index}.tmp")), b"ignored").unwrap();
+            assert_eq!(
+                windows_registration_candidates(root.path()).unwrap().len(),
+                1
+            );
+        }
+        fs::create_dir(root.path().join("overflow")).unwrap();
+        assert_eq!(
+            windows_registration_candidates(root.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the real Windows foreground OCR provider and pinned scan"]
+    fn windows_real_foreground_provider_is_consumed_and_recovered() {
+        use crate::connect::windows_storage;
+        let source_path =
+            PathBuf::from(std::env::var_os("DOCSUM_NATIVE_OCR_SCAN").expect("real scan"));
+        let expected_path = PathBuf::from(
+            std::env::var_os("DOCSUM_NATIVE_OCR_BASELINE").expect("qualified baseline"),
+        );
+        let local = windows_storage::local_app_data_root(std::env::var_os("LOCALAPPDATA")).unwrap();
+        for protocol in [2, 3] {
+            let directory = local.join(format!("LocalConnect/runtime/v{protocol}/providers"));
+            windows_storage::validate_private_directory(&directory, &local)
+                .expect("live registration directory admission");
+            let mut live = 0;
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let bytes = windows_storage::read_bounded_inherited_private_file(
+                    &path,
+                    MAX_REGISTRATION_BYTES,
+                    &local,
+                )
+                .expect("live registration private read");
+                let registration =
+                    decode_registration(&bytes, protocol).expect("live registration schema");
+                if registration.app_id != OCR_APP_ID {
+                    continue;
+                }
+                assert!(
+                    read_windows_registration(&path, &local, protocol).is_some(),
+                    "live registration filename identity"
+                );
+                let provider =
+                    probe_registration(&discovery_client().unwrap(), registration, protocol)
+                        .unwrap();
+                assert!(
+                    provider.is_some(),
+                    "live registration authenticated manifest profile"
+                );
+                live += 1;
+            }
+            assert_eq!(live, 1, "one actual OCR provider for each protocol");
+            println!("REAL_CONSUMER_DISCOVERY v{protocol} private_read=true schema=true authenticated_manifest=true");
+        }
+        let source = fs::read(&source_path).unwrap();
+        let input_hash = sha256_hex(&source);
+        let baseline: serde_json::Value =
+            serde_json::from_slice(&fs::read(expected_path).unwrap()).unwrap();
+        let expected = &baseline["cases"][&input_hash];
+        assert!(
+            expected.is_object(),
+            "scan must exist in the qualified baseline"
+        );
+        let directory = TempDir::new().unwrap();
+        let app_data = directory.path().join("consumer");
+        windows_storage::ensure_private_directory(&app_data, directory.path()).unwrap();
+        let mut conn = db::init_db(app_data.join("summarizer.db")).unwrap();
+        let (document, received) =
+            prepare_pdf_ingestion(source_path.to_str().unwrap(), None).unwrap();
+        let ingested = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let (parsing, persisted) =
+            db::start_parsing(&mut conn, &ingested.run_id, ingested.state_version).unwrap();
+        parse_started_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &parsing.run_id,
+            parsing.state_version,
+            &persisted,
+        )
+        .unwrap();
+        let child_id = process_scanned_document(
+            &mut conn,
+            &parsing.run_id,
+            &app_data,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .expect("real native consumer must discover, submit and admit OCR output");
+        let handoff = db::get_ocr_handoff_for_root(&conn, &parsing.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved_protocol(&handoff).unwrap(), 3);
+        let pdf = handoff.ocr_pdf_bytes.as_ref().unwrap();
+        let text = canonical_tagged_ocr_text(pdf).unwrap();
+        assert_eq!(handoff.text_bytes.as_deref(), Some(text.as_slice()));
+        assert_eq!(sha256_hex(pdf), expected["pdf_sha256"].as_str().unwrap());
+        assert_eq!(pdf.len() as u64, expected["pdf_bytes"].as_u64().unwrap());
+        assert_eq!(sha256_hex(&text), expected["text_sha256"].as_str().unwrap());
+        assert_eq!(text.len() as u64, expected["text_bytes"].as_u64().unwrap());
+        assert_eq!(fs::read(&handoff.derived_path).unwrap(), *pdf);
+        assert_eq!(handoff.child_run_id, child_id);
+        fs::remove_file(&handoff.derived_path).unwrap();
+        drop(conn);
+        let mut reopened = db::init_db(app_data.join("summarizer.db")).unwrap();
+        let again = process_scanned_document(
+            &mut reopened,
+            &parsing.run_id,
+            &app_data,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let recovered = db::get_ocr_handoff_for_root(&reopened, &parsing.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again, child_id);
+        assert_eq!(recovered.provider_job_id, handoff.provider_job_id);
+        assert_eq!(fs::read(&recovered.derived_path).unwrap(), *pdf);
+        if let Some(output) = std::env::var_os("DOCSUM_NATIVE_OCR_OUTPUT") {
+            let output = PathBuf::from(output);
+            fs::write(output.join("ocr.pdf"), pdf).unwrap();
+            fs::write(output.join("ocr.txt"), &text).unwrap();
+        }
+        println!("REAL_WINDOWS_CONSUMER input_sha256={input_hash} protocol=3 pdf_sha256={} text_sha256={} same_child_after_reopen=true same_provider_job=true", sha256_hex(pdf), sha256_hex(&text));
     }
 
     #[test]
@@ -2161,7 +2535,7 @@ mod tests {
         assert!(db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn snapshot_failure_does_not_admit_child_and_recovery_retries_same_output() {
         let directory = TempDir::new().unwrap();
@@ -2210,7 +2584,7 @@ mod tests {
                 &transport,
                 &UNCONTROLLED_EXECUTION,
             ),
-            Err(OcrConsumerError::InvalidOutput(_))
+            Err(OcrConsumerError::InvalidOutput(_) | OcrConsumerError::Io(_))
         ));
         assert_eq!(
             db::get_ocr_handoff(&conn, &handoff.handoff_id)
