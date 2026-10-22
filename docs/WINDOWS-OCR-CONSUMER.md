@@ -102,3 +102,16 @@ when replacing an existing file. Those diagnostics and backup-restore edge cases
 remain non-blocking follow-up in reviewer note 151, not additional port slices.
 
 Accepted as test fidelity repair and explicit disclosure of the existing policy.
+
+Reproduced note 151 with the previously qualified consumer executable and an
+owned `.tmp` discovery file: it panicked at `live registration schema` before
+submitting the scan. The native test now creates its own temporary non-registration
+file and calls production discovery. Against the actual rebuilt OCR package
+(`0ad491db5b95a82db16ba6d6e8982865662916cc`), it passed in 1.13s with the
+same PDF/text hashes, same child and same provider job after reopening. Native
+adjacent results: consumer 11 passed/1 ignored; storage 5 passed. The enclosing
+packaged-provider test passed in 17.41s. Evidence alias:
+`prove-package-v3-noise-after-20261022T000622Z.log`; consumer executable SHA256
+`252bee64aae852b221f986a7d5d1962c367e8e655c7345233e2f82f9fcda89fc`.
+This fixes the test-only admission copy introduced in `e25a1a9`; it does not
+change the production discovery policy or the deferred diagnostics above.

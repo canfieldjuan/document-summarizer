@@ -2058,38 +2058,23 @@ mod tests {
             std::env::var_os("DOCSUM_NATIVE_OCR_BASELINE").expect("qualified baseline"),
         );
         let local = windows_storage::local_app_data_root(std::env::var_os("LOCALAPPDATA")).unwrap();
+        let discovery_directory = local.join("LocalConnect/runtime/v2/providers");
+        windows_storage::validate_private_directory(&discovery_directory, &local).unwrap();
+        let _non_registration = tempfile::Builder::new()
+            .prefix("docsum-native-proof-")
+            .suffix(".tmp")
+            .tempfile_in(discovery_directory)
+            .unwrap();
+        let providers = discover_windows_providers(&local).expect("production Windows discovery");
         for protocol in [2, 3] {
-            let directory = local.join(format!("LocalConnect/runtime/v{protocol}/providers"));
-            windows_storage::validate_private_directory(&directory, &local)
-                .expect("live registration directory admission");
-            let mut live = 0;
-            for entry in fs::read_dir(directory).unwrap() {
-                let path = entry.unwrap().path();
-                let bytes = windows_storage::read_bounded_inherited_private_file(
-                    &path,
-                    MAX_REGISTRATION_BYTES,
-                    &local,
-                )
-                .expect("live registration private read");
-                let registration =
-                    decode_registration(&bytes, protocol).expect("live registration schema");
-                if registration.app_id != OCR_APP_ID {
-                    continue;
-                }
-                assert!(
-                    read_windows_registration(&path, &local, protocol).is_some(),
-                    "live registration filename identity"
-                );
-                let provider =
-                    probe_registration(&discovery_client().unwrap(), registration, protocol)
-                        .unwrap();
-                assert!(
-                    provider.is_some(),
-                    "live registration authenticated manifest profile"
-                );
-                live += 1;
-            }
-            assert_eq!(live, 1, "one actual OCR provider for each protocol");
+            assert_eq!(
+                providers
+                    .iter()
+                    .filter(|provider| provider.protocol_version == protocol)
+                    .count(),
+                1,
+                "one actual OCR provider for each protocol"
+            );
             println!("REAL_CONSUMER_DISCOVERY v{protocol} private_read=true schema=true authenticated_manifest=true");
         }
         let source = fs::read(&source_path).unwrap();
@@ -2575,15 +2560,19 @@ mod tests {
         let obstruction = directory.path().join("ocr-derived");
         fs::write(&obstruction, b"not a directory").unwrap();
         let transport = LostAckTransport::default();
+        let failure = run_handoff(
+            &mut conn,
+            output_ready.clone(),
+            directory.path(),
+            &provider,
+            &transport,
+            &UNCONTROLLED_EXECUTION,
+        );
+        #[cfg(unix)]
+        assert!(matches!(failure, Err(OcrConsumerError::InvalidOutput(_))));
+        #[cfg(windows)]
         assert!(matches!(
-            run_handoff(
-                &mut conn,
-                output_ready.clone(),
-                directory.path(),
-                &provider,
-                &transport,
-                &UNCONTROLLED_EXECUTION,
-            ),
+            failure,
             Err(OcrConsumerError::InvalidOutput(_) | OcrConsumerError::Io(_))
         ));
         assert_eq!(
