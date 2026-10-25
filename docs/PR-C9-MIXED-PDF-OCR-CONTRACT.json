@@ -1,0 +1,208 @@
+{
+  "status": "CORRECTED_CONTRACT_ACCEPTED_RESERVATION_PENDING",
+  "created_at": "2026-10-25T22:33:37.981730+00:00",
+  "scope": "First source-preparation repair: shared mixed-PDF OCR eligibility for routing and durable admission. Original routing contract accepted; expanded database guard/helper write scope requires acceptance of this revision. No native layout rewrite.",
+  "source_base": "f208681012356183344e74282febdad419cbcd96",
+  "proven_inventory": {
+    "model_parity": {
+      "alias": "native-message-boundary-repair-20261007/result-summary.json",
+      "sha256": "8cc43e004e2ec3a0f644a7a2d694b1be55ba6922757c38585bea4a11b497662e",
+      "observed": "Two native outputs byte-equal to their pre-production counterparts; no retries. Same supplied text, not proof of full PDF extraction or independent fidelity."
+    },
+    "model_sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+    "server_sha256": "0ca399edd758decd825a71823b04ba7ddbc8b2e10d2309d8bf623ee3c2283099",
+    "reference": {
+      "runner": "summary_run.py qwen35-9b",
+      "context": 32768,
+      "temperature": 0,
+      "thinking": "off",
+      "transport": "Jinja chat over TCP",
+      "observed_slots": 4,
+      "offload": 99,
+      "flash_attention": "on",
+      "seed": "omitted; captured server default4294967295",
+      "output_allowance": 1500,
+      "cases": [
+        {
+          "prompt_tokens": 8587,
+          "output_tokens": 773
+        },
+        {
+          "prompt_tokens": 18420,
+          "output_tokens": 939
+        }
+      ],
+      "recorded_result": "Corrected native adapter reproduced both saved outputs byte-for-byte in two calls, normal stop, no retries. This proves same-input reproducibility and capacity, not complete-fidelity gold.",
+      "receipt_alias": "native-message-boundary-repair-20261007/result-summary.json",
+      "receipt_sha256": "8cc43e004e2ec3a0f644a7a2d694b1be55ba6922757c38585bea4a11b497662e"
+    },
+    "prior_port_decisions": [
+      "Versioned complete normalized source and owned dependency/contextual citation registry instead of flat text. Source identities and coverage are frozen, not sampled.",
+      "Atomic-claim JSON with exact source IDs, unchanged1200-scalar text and8-source per-unit boundaries, document claim ceiling64 instead of freeform brief.",
+      "Capacity-admitted sections with initial and data-dependent child requests, persisted progress and deterministic assembly; no model consolidation call.",
+      "Current pinned native product factory: one slot, offload999, private-socket completion transport and already repaired message/thinking framing. These settings are established port decisions; do not rerun a setting experiment here.",
+      "Production generation_seed_for_run remains authoritative. Offline seed7 is only capacity evidence; do not substitute it or historical default4294967295.",
+      "Actual per-request schema/output allowance is produced by the existing budget owner. Do not apply the historical1500 allowance to the new shape.",
+      "Independent frozen fact-coverage/fidelity review after generation; original freeform parity and unchanged C9/SAME60 stay separate regression scopes."
+    ],
+    "original_pdfs": [
+      {
+        "alias": "preproduction-1",
+        "pdf_sha256": "a26124eaf586b0fe423eeede0fd264bb0fc1edf83925718c6ae035d9539cf24d",
+        "parsed_pages": 15,
+        "run_seed": 2125763738245049619,
+        "initial_analyze_request_sha256": "339705ca5148d536b2bdbb7d52bddba8351f254efbd0dd53766fb1f2388298d2",
+        "analyzed_artifact_present": false
+      },
+      {
+        "alias": "preproduction-2",
+        "pdf_sha256": "d9c46b09a1abc5916a9b0194cd82f350800b843de998928ff1ce35df8349c67a",
+        "parsed_pages": 10,
+        "run_seed": 2706044255414516996,
+        "initial_analyze_request_sha256": "41135ffd78abca02cc0bd9f6f554767951147c070e2dc27b52c1f3926fb8eb28",
+        "analyzed_artifact_present": false
+      }
+    ],
+    "offline_result": {
+      "alias": "c9-pdf-writer-continuation-20261024/offline-results.json",
+      "sha256": "be8866d18d9f8c040081ab2ec83c4c9ac8339c23fe3077ab8698f2b72cad0c9b",
+      "observed": "All seven historical owners passed; both actual-PDF writer plans failed before generation. First has unread substantive page15; second has source-layout/heading-boundary failures."
+    },
+    "ocr_current_owner": {
+      "predicate": "src-tauri/src/connect/ocr_consumer.rs:296-302",
+      "caller": "src-tauri/src/desktop.rs:607-632",
+      "source_signal": "src-tauri/src/pipeline/parser.rs:117-140",
+      "lineage": "ocr_consumer.rs::process_scanned_document / admit_child, parser.rs::TaggedOcrParser",
+      "existing_tests": [
+        "routing_requires_the_whole_document_no_text_signal",
+        "empty_page_is_preserved_with_visual_routing_marker",
+        "direct_normalization_cannot_advance_an_ocr_owned_root",
+        "lost_acknowledgement_reconciles_before_one_child_admission_after_reopen"
+      ],
+      "evidence_status": "Read directly; not rerun for this contract-only commit.",
+      "durable_admission": "src-tauri/src/pipeline/db.rs:389-424 prepare_ocr_handoff duplicates whole-document-warning eligibility, currently rejecting with: the root document is not an exact admitted whole-document scan",
+      "test_fixture_owner": "src-tauri/src/pipeline/parser.rs::tests; existing build_pdf, FixturePage, save_pdf, ingest_fixture. Both new fail-first regressions live here and call actual production router/store owners.",
+      "excluded_live_probe": "src-tauri/src/connect/ocr_consumer/streamed/tests.rs:1216 records native_requires_ocr but does not freeze-assert it. The ignored frozen-corpus probe dispatches an isolated production OCR provider; do not run it in this zero-live-budget slice."
+    },
+    "unknowns": [
+      "Exact producer of the original frozen contract text is not recovered: summary_run.py reads prepared text, and the recovered evaluation render function is not proof of a contract-text producer.",
+      "No accepted OCR-derived projection for the first real PDF; real OCR has not been dispatched in this lane.",
+      "This contract does not identify a qualified replacement native layout extractor."
+    ]
+  },
+  "root_cause": {
+    "invariant": "A native document with any parser-marked unread page must reach the source-recovery owner before whole-document summary preparation; the marker must never be cleared downstream.",
+    "confirmed": "PdfExtractParser marks each empty-native-text page requires_visual_processing=true and NO_NATIVE_TEXT. It sets document-wide NO_NATIVE_TEXT_IN_DOCUMENT only when every page is empty. parsed_document_requires_ocr checks only that document-wide warning. A mixed PDF therefore bypasses the OCR branch in desktop, while the whole-document writer correctly rejects its incomplete source. db.rs::prepare_ocr_handoff separately enforces that same whole-document-only warning, so changing routing alone would still hard-fail durable admission before transport.",
+    "real_reproduction": "preproduction-1:15 parsed pages, visual_pages=[15], document warnings=[], NativeText. Retained writer failure WHOLE_DOCUMENT_SOURCE_INVALID; visible page15 contains material text.",
+    "introducing_commit": "ad747378bed5f359022f11a3a91a75850e16f2c2 introduced the whole-document-only OCR predicate. It was designed for fully scanned documents; that admission scope is insufficient for complete mixed-PDF source coverage.",
+    "earlier_special_cases": "Replace BOTH document-warning eligibility copies with ONE app-internal ParsedDocument eligibility owner and delegate router/store to it. Remove their old warning-only logic; no OR branch or downstream substitute detector. Keep all other admission checks unchanged."
+  },
+  "behavioral_contract": {
+    "eligibility": "SourceType::NativeText AND at least one parsed page has requires_visual_processing=true. The parser-owned page marker is authoritative; do not re-extract or inspect text in the routing predicate.",
+    "non_eligible": [
+      "All native pages readable.",
+      "SourceType::OcrText, even with a malformed visual marker: never recursively OCR a derived document.",
+      "No pages, including a spurious document warning: do not dispatch from missing source."
+    ],
+    "whole_pdf_recovery": "Use the unchanged original PDF and the existing whole-document OCR request, retained handoff and derived OcrText child. Preserve the root, source hash, provider identity, page-count validation, retry/cancellation/recovery ownership and source provenance. No native/OCR per-page splice.",
+    "cost": "Any unread native page routes the whole PDF, including a genuinely blank page because the parser does not distinguish blank from content lacking native text. This can add OCR cost and change extracted text on already-readable pages. The derived source must be independently checked before qualification; this contract grants no live OCR spend. In particular, with no OCR provider installed, a native PDF with an actually blank page will now fail with OCR_HANDOFF_FAILED instead of continuing natively. No capability to identify a known-blank page is claimed.",
+    "errors": "Existing provider-unavailable, cap, malformed output and cancellation errors remain truthful; never fall back to an incomplete summary or reuse an unqualified replacement source.",
+    "first_pdf_after_offline_repair": "Eligibility becomes true. Its original incomplete NativeText artifact must still fail the writer guard. A successful writer plan is not claimed until a separately approved real OCR result is complete, verified and frozen.",
+    "second_pdf": "OCR eligibility remains false. Its source-layout/boundary blocker is retained and not repaired by this slice.",
+    "durable_admission": "The store consumes the same ParsedDocument eligibility helper as routing. Keep Parsed state, root-document identity, document NativeText, source size equality, original byte/hash equality, supplied hash equality and provider-app id checks unchanged. Update the old whole-document-scan rejection wording to describe an exact admitted native source requiring OCR; no schema change."
+  },
+  "differences_from_proven_setup": [
+    "OCR routing expands from wholly unread native PDFs to native PDFs with any unread page. Existing OCR transport, provider contract and child format stay the same.",
+    "A later real OCR result would be a new OcrText source projection, not byte-parity with the old frozen native text; old text/model-parity receipts remain immutable.",
+    "No current model request, prompt, framing, model, runtime or sampler changes. No new model performance/capacity hypothesis is tested."
+  ],
+  "required_change_surface": [
+    "pipeline/contracts.rs: one app-internal ParsedDocument eligibility helper; no new serialized field or format.",
+    "connect/ocr_consumer.rs: routing wrapper delegates to shared helper, update old routing expectation and boundary twins.",
+    "pipeline/db.rs::prepare_ocr_handoff: consume same helper in place of duplicate whole-document-warning condition; retain every other check; correct rejection wording.",
+    "pipeline/parser.rs tests: reuse existing PDF fixtures for real parser-to-router and parser-to-durable-admission fail-first regressions; no parser behavior edits.",
+    "Narrow ignored parse-only hash-bound original-PDF eligibility probe if needed; never run streamed frozen-corpus provider dispatch.",
+    "Update only current routing claims/tests/contract; preserve historical receipts and historical protocol fixtures."
+  ],
+  "explicit_non_scope": [
+    "No native layout extraction implementation, parser replacement, new geometry subsystem or heading-grammar change. Preserve the second PDF blocker and specify its source owner separately.",
+    "No hybrid source, native-text correction bypass, manual transcription presented as production extraction, page deletion, visual-marker clearing or source guard relaxation.",
+    "No edits to shared lib.rs/command registration, Connect wire contracts/SDK/lockfiles, Windows discovery/storage changes, database schema or correction format.",
+    "No model/OCR inference, real provider submission/polling, GPU changes, real tokenizer/native preflight, new Synthesize/Analyze/Verify generation, label/benchmark change or replacement run.",
+    "No PR73/77 implementation or frozen132/146/148 branch push/rebase/merge. All PR116 fidelity, full-document, unseen and retained-native-profile holds remain."
+  ],
+  "assumptions_blockers": {
+    "operator_acceptance": "Direct acceptance received: Accept corrected contract, binding dedcc14 and expanded database/helper write scope.",
+    "shared_file_reservation": "Pending windows-port confirmation for OCR delegation/tests, DB admission check/tests and app-local eligibility helper. No shared production edits until confirmation.",
+    "pr150_identity": "95d160a8055a725e37a8e56b0189c781fa19b6d6: predicate matches main939f89f40c2b74a43cb21dfc08bb7cdabaefc2ea; discovery/materialization changes are outside this scope.",
+    "publication_base": "Current reproduction base is the held C9 combined source. Before implementation/publication, settle the reservation and exact target with laneA; no silent merge of branch stacks. Any necessary base adjustment must preserve the isolated predicate behavior and recorded historical proof."
+  },
+  "verification_plan": {
+    "fail_first": "Add routing_uses_parser_visual_page_signal_for_mixed_native_pdf: a readable native page plus an unread native page with no document-wide warning must require OCR. Demonstrate assertion failure on the old predicate before editing it.",
+    "boundary_twins": [
+      "All-native readable false; all-unread native true; mixed unread page first/middle/last true.",
+      "The same page arrays marked OcrText false, preventing recursive recovery.",
+      "Page marker false with a stray document-wide no-text warning false; page marker true with no document-wide warning true.",
+      "Empty page vector false; one marked page true; multiple marked pages still use one existing root/child handoff.",
+      "A physically blank public PDF page follows the same source-recovery rule, without treating it as known-empty content."
+    ],
+    "owner_integration": "Use the actual parser for a public mixed text/image PDF and existing in-process fake OCR transport/retained public tagged artifact. Prove the original PDF hash and all pages reach existing handoff validation, one derived child is admitted, root cannot normalize past OCR ownership, derived provenance remains OcrText. No live provider or model execution.",
+    "regression_siblings": [
+      "Existing cancellation/recovery/lost-acknowledgement tests around the unchanged handoff.",
+      "Private parse-only eligibility probe: first frozen original PDF true; second false. Assert that the first original incomplete native artifact still fails source-completeness admission.",
+      "Rerun unchanged seven-owner historical C9/writer lane and compare complete dependency/capacity/assembly/SAME60 verdict lists; no unexpected changes."
+    ],
+    "mutation": "Restore the old document-warning-only predicate and require the new mixed-PDF test to fail by assertion, then restore the fix. A setup/compile/timeout failure is not a mutation kill.",
+    "format_lint_ci": "Focused owner tests, cargo fmt --check, strict Clippy per repository contract; hosted required CI includes native Windows. Do not duplicate unrelated broad local matrices.",
+    "proof_limits": "Offline handoff proof establishes routing/lineage, not actual OCR text accuracy or real-PDF writer success. Those remain separate explicit frozen-source qualification and live-budget gates.",
+    "store_negative_twins": "Before first admission: corrupt source bytes, mismatched size, wrong supplied digest, wrong root document id, wrong provider app id, wrong root state and a readable-only native parse must still fail. Assert no durable handoff or transport on rejection.",
+    "excluded_probe": "Do not run connect::ocr_consumer::streamed::tests frozen-corpus dispatch. It has real isolated provider side effects and is outside this slice."
+  },
+  "authorization": {
+    "model_calls": 0,
+    "real_ocr_dispatches": 0,
+    "real_runtime_startups": 0,
+    "native_preflights": 0,
+    "real_tokenizer_http_calls": 0,
+    "allowed": "Offline parsing, existing in-process fake transports and source-only test seams after contract acceptance/reservation.",
+    "implementation_authorized": true,
+    "acceptance": {
+      "operator_message": "Accept this contract",
+      "accepted_commit": "bddccd4e9644669ba3c8bc11f52c58cec1a05335",
+      "accepted_sha256": "2146100679a60bf639fb2344218ef38ad7e15d3229c046ad76d7fe2c92bb3d61",
+      "recorded_at": "2026-10-25T22:35:49.901075+00:00"
+    },
+    "accepted_independent_work": "Corrected implementation scope accepted; shared production owner writes remain blocked on reservation. Independent parser-owned tests may continue.",
+    "corrected_acceptance": {
+      "operator_message": "Accept corrected contract",
+      "commit": "dedcc14455363718f733efe3cecf7dc23419037e",
+      "sha256": "4447341a333640bbe4e18f76b1e2a6bfc9b26e3304a5cfe864dc252934e01329",
+      "recorded_at": "2026-10-25T22:44:18.892340+00:00"
+    }
+  },
+  "implementation_summary": "Operator accepted before implementation. Parser-owned public fail-first regression added: actual production mixed PDF parse reaches the old predicate and fails the expected routing assertion. Shared implementation files remain unchanged pending reservation.",
+  "cold_diff_audit": "This revision adds the omitted durable-admission owner, parser fixture/test inventory, excluded live probe and explicit blank-page/provider-unavailable consequence. Only contract documentation plus independent public fail-first parser tests changed so far; shared production implementation remains untouched.",
+  "gap_audit": {
+    "status": "NOT DONE",
+    "remaining": [
+      "Expanded shared-file reservation and target sequencing.",
+      "Complete fail-first/repair/integration/regression/mutations and independent exact-head review/CI.",
+      "Real complete OCR-derived first source and separate native-layout repair; no C9 live qualification or merge clearance."
+    ]
+  },
+  "technical_revision": {
+    "reason": "The whole-concept search found a second whole-document-only gate in db.rs::prepare_ocr_handoff:404-420. A consumer-only fix cannot admit a mixed PDF.",
+    "scope": "Technical consolidation within the accepted NativeText AND any visual-page marker behavior; no new product behavior, serialized fields, database schema, provider contract or live spend.",
+    "owner": "One app-internal helper on ParsedDocument in pipeline/contracts.rs; OCR routing and durable admission delegate to it.",
+    "required_surface": [
+      "pipeline/contracts.rs: add only an internal eligibility helper, no serialization change.",
+      "pipeline/db.rs::prepare_ocr_handoff: replace the duplicate document-warning test with the shared helper, retain source/root/provider/byte/transaction checks.",
+      "pipeline/parser.rs tests: reuse existing PDF fixtures for fail-first parser-to-router and parser-to-durable-admission regressions."
+    ],
+    "verification": "Both router and persisted handoff must pass the same real parser-derived mixed input. Add negative admission twins before first admission, and kill the old database-only gate as well as the old router gate.",
+    "ownership": "Extended hunk reservation requested; no edits to consumer, contracts helper or database gate until windows-port confirms.",
+    "acceptance": "Direct operator accepted exact corrected dedcc14 contract before database/helper/predicate implementation. Shared-file reservation remains pending.",
+    "rejection_message": "Current whole-document-scan wording becomes exact admitted native source requiring OCR, matching mixed-source admission."
+  },
+  "nonblocking_followup": "Already-Parsed roots resumed through BackgroundWork::Continue do not pass the initial desktop OCR-routing branch again. Writer remains fail-closed. Existing-run recovery behavior is separate follow-up scope, not a reason to broaden this repair."
+}
