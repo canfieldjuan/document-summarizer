@@ -1721,6 +1721,259 @@ mod tests {
     }
 
     #[test]
+    fn routing_uses_parser_visual_page_signal_for_mixed_native_pdf() {
+        let pdf = save_pdf(build_pdf(vec![
+            FixturePage::Text(b"Readable contract terms.".to_vec()),
+            FixturePage::ImageOnly,
+        ]));
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let run = ingest_fixture(&mut conn, &pdf.0);
+        let parsed = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
+            .expect("mixed PDF should parse");
+
+        assert!(!parsed.pages[0].requires_visual_processing);
+        assert!(parsed.pages[1].requires_visual_processing);
+        assert!(!parsed
+            .warnings
+            .iter()
+            .any(|w| w.code == "NO_NATIVE_TEXT_IN_DOCUMENT"));
+        assert!(
+            crate::connect::ocr_consumer::parsed_document_requires_ocr(&parsed),
+            "mixed native PDF must route its parser-marked unread page to source recovery"
+        );
+    }
+
+    #[test]
+    fn mixed_native_pdf_can_reserve_existing_durable_ocr_handoff() {
+        let pdf = save_pdf(build_pdf(vec![
+            FixturePage::Text(b"Readable contract terms.".to_vec()),
+            FixturePage::ImageOnly,
+        ]));
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let run = ingest_fixture(&mut conn, &pdf.0);
+        let parsed = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
+            .expect("mixed PDF should parse");
+        let document = db::get_document(&conn, &parsed.document_id)
+            .unwrap()
+            .unwrap();
+        let source = fs::read(&pdf.0).unwrap();
+        let admission = db::NewOcrHandoff {
+            handoff_id: "public-mixed-handoff",
+            root_run_id: &run.run_id,
+            root_document_id: &document.document_id,
+            source_artifact_id: "public-source-artifact",
+            source_bytes: &source,
+            source_sha256: &document.content_hash,
+            source_display_name: "mixed-source.pdf",
+            provider_app_id: "document-ocr",
+            provider_instance_id: "public-provider-instance",
+            provider_job_id: "public-provider-job",
+            provider_request_json: "{}",
+            child_document_id: "public-derived-document",
+            child_run_id: "public-derived-run",
+            derived_path: "public-derived.pdf",
+        };
+        let handoff = db::prepare_ocr_handoff(&mut conn, &admission)
+            .expect("mixed native PDF must admit the existing durable OCR handoff");
+        assert_eq!(handoff.source_bytes, source);
+        assert_eq!(handoff.source_sha256, document.content_hash);
+        assert_eq!(handoff.phase, "prepared");
+        assert_eq!(
+            db::prepare_ocr_handoff(&mut conn, &admission).unwrap(),
+            handoff,
+            "replay must keep one stable handoff"
+        );
+    }
+
+    #[test]
+    fn ocr_eligibility_uses_page_signal_and_never_recurses_into_derived_source() {
+        let pdf = save_pdf(build_pdf(vec![FixturePage::Text(
+            b"Readable terms.".to_vec(),
+        )]));
+        let mut conn = db::init_db(":memory:").unwrap();
+        let run = ingest_fixture(&mut conn, &pdf.0);
+        let original = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+        for unread in [vec![], vec![0], vec![1], vec![2], vec![0, 1, 2]] {
+            let mut parsed = original.clone();
+            parsed.pages = (0..3)
+                .map(|i| {
+                    let mut page = original.pages[0].clone();
+                    page.page_number = i + 1;
+                    page.requires_visual_processing = unread.contains(&i);
+                    page
+                })
+                .collect();
+            assert_eq!(
+                crate::connect::ocr_consumer::parsed_document_requires_ocr(&parsed),
+                !unread.is_empty(),
+                "unread pages: {unread:?}"
+            );
+            parsed.source_type = SourceType::OcrText;
+            assert!(!crate::connect::ocr_consumer::parsed_document_requires_ocr(
+                &parsed
+            ));
+        }
+        let mut parsed = original;
+        parsed.warnings.push(PipelineWarning {
+            code: "NO_NATIVE_TEXT_IN_DOCUMENT".into(),
+            message: "stale document-wide warning".into(),
+            stage: Some(PipelineStage::Parse),
+        });
+        assert!(!crate::connect::ocr_consumer::parsed_document_requires_ocr(
+            &parsed
+        ));
+        parsed.pages.clear();
+        assert!(!crate::connect::ocr_consumer::parsed_document_requires_ocr(
+            &parsed
+        ));
+    }
+
+    #[test]
+    fn durable_ocr_admission_preserves_native_source_and_identity_checks() {
+        let pdf = save_pdf(build_pdf(vec![FixturePage::ImageOnly]));
+        for case in [
+            "valid",
+            "source-size",
+            "source-bytes",
+            "source-digest",
+            "root-document",
+            "provider",
+            "state",
+            "source-type",
+        ] {
+            let mut conn = db::init_db(":memory:").unwrap();
+            let run = if case == "source-type" {
+                let (document, run) = prepare_pdf_ingestion_with_source_type(
+                    pdf.0.to_str().unwrap(),
+                    None,
+                    SourceType::OcrText,
+                )
+                .unwrap();
+                db::persist_ingestion(&mut conn, &document, &run).unwrap();
+                run
+            } else {
+                ingest_fixture(&mut conn, &pdf.0)
+            };
+            let parsed = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+            let document = db::get_document(&conn, &parsed.document_id)
+                .unwrap()
+                .unwrap();
+            let mut source = fs::read(&pdf.0).unwrap();
+            if case == "source-size" {
+                source.push(0);
+            }
+            if case == "source-bytes" {
+                source[0] ^= 1;
+            }
+            if case == "state" {
+                let current = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+                db::start_normalizing(&mut conn, &run.run_id, current.state_version).unwrap();
+            }
+            let before = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+            let mut admission = db::NewOcrHandoff {
+                handoff_id: "public-guard-handoff",
+                root_run_id: &run.run_id,
+                root_document_id: &document.document_id,
+                source_artifact_id: "public-source-artifact",
+                source_bytes: &source,
+                source_sha256: &document.content_hash,
+                source_display_name: "guard-source.pdf",
+                provider_app_id: "document-ocr",
+                provider_instance_id: "public-provider-instance",
+                provider_job_id: "public-provider-job",
+                provider_request_json: "{}",
+                child_document_id: "public-derived-document",
+                child_run_id: "public-derived-run",
+                derived_path: "public-derived.pdf",
+            };
+            match case {
+                "source-digest" => admission.source_sha256 = "wrong-digest",
+                "root-document" => admission.root_document_id = "another-document",
+                "provider" => admission.provider_app_id = "another-provider",
+                _ => {}
+            }
+            let result = db::prepare_ocr_handoff(&mut conn, &admission);
+            if case == "valid" {
+                assert_eq!(result.unwrap().phase, "prepared");
+            } else {
+                assert!(
+                    matches!(result, Err(db::StoreError::InvalidOcrHandoff(_))),
+                    "{case}: {result:?}"
+                );
+                assert!(
+                    db::get_ocr_handoff_for_root(&conn, &run.run_id)
+                        .unwrap()
+                        .is_none(),
+                    "{case}"
+                );
+                assert!(
+                    db::list_recoverable_ocr_handoffs(&conn).unwrap().is_empty(),
+                    "{case}"
+                );
+            }
+            let after = db::get_pipeline_run(&conn, &run.run_id).unwrap().unwrap();
+            assert_eq!(after.state, before.state, "{case}");
+            assert_eq!(after.state_version, before.state_version, "{case}");
+        }
+    }
+
+    #[test]
+    #[ignore = "offline OCR eligibility only; explicit hash-bound PDF packet and private output required"]
+    fn frozen_pdf_ocr_eligibility_without_dispatch() {
+        use std::io::Write;
+        let packet: serde_json::Value = serde_json::from_slice(
+            &fs::read(std::env::var_os("DOC_SUM_MIXED_OCR_INPUT").unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(packet["version"], 1);
+        assert_eq!(packet["live_authorization"], 0);
+        let mut rows = Vec::new();
+        for case in packet["cases"].as_array().unwrap() {
+            let bytes = fs::read(case["path"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&bytes)),
+                case["sha256"].as_str().unwrap()
+            );
+            let (document, _) = crate::pipeline::ingest::prepare_pdf_ingestion(
+                case["path"].as_str().unwrap(),
+                Some("frozen-source.pdf"),
+            )
+            .unwrap();
+            assert_eq!(document.content_hash, case["sha256"].as_str().unwrap());
+            let parsed = PdfExtractParser::new().parse(&document).unwrap();
+            let eligible = crate::connect::ocr_consumer::parsed_document_requires_ocr(&parsed);
+            assert_eq!(
+                eligible,
+                case["expected_requires_ocr"].as_bool().unwrap(),
+                "{}",
+                case["alias"]
+            );
+            rows.push(serde_json::json!({"alias":case["alias"],"pdf_sha256":case["sha256"],
+                "pages":parsed.pages.len(),"visual_pages":parsed.pages.iter().filter(|p|p.requires_visual_processing).map(|p|p.page_number).collect::<Vec<_>>(),
+                "requires_ocr":eligible}));
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(std::env::var_os("DOC_SUM_MIXED_OCR_OUTPUT").unwrap())
+            .unwrap()
+            .write_all(
+                &serde_json::to_vec_pretty(&serde_json::json!({"cases":rows,
+                "model_calls":0,"ocr_dispatches":0,"runtime_startups":0}))
+                .unwrap(),
+            )
+            .unwrap();
+        println!(
+            "FROZEN_PDF_OCR_ELIGIBILITY_SAVED model_calls=0 ocr_dispatches=0 runtime_startups=0"
+        );
+    }
+
+    #[test]
     fn image_only_pdf_reaches_parsed_with_no_native_text_warnings() {
         let pdf = save_pdf(build_pdf(vec![FixturePage::ImageOnly]));
         let mut conn = db::init_db(":memory:").expect("schema should initialize");

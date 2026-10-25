@@ -294,11 +294,7 @@ fn read_bounded_response(response: Response, limit: u64) -> io::Result<Vec<u8>> 
 }
 
 pub(crate) fn parsed_document_requires_ocr(parsed: &ParsedDocument) -> bool {
-    parsed.source_type == SourceType::NativeText
-        && parsed
-            .warnings
-            .iter()
-            .any(|warning| warning.code == "NO_NATIVE_TEXT_IN_DOCUMENT")
+    parsed.requires_ocr()
 }
 
 pub(crate) fn process_scanned_document(
@@ -1796,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_requires_the_whole_document_no_text_signal() {
+    fn routing_delegates_to_parser_owned_page_signal() {
         let page = ParsedPage {
             page_number: 1,
             text: String::new(),
@@ -1815,15 +1811,132 @@ mod tests {
             pages: vec![page],
             warnings: Vec::new(),
         };
-        assert!(!parsed_document_requires_ocr(&parsed));
+        assert!(parsed_document_requires_ocr(&parsed));
+        parsed.pages[0].requires_visual_processing = false;
         parsed.warnings.push(PipelineWarning {
             code: "NO_NATIVE_TEXT_IN_DOCUMENT".to_string(),
             message: "NO_NATIVE_TEXT_IN_DOCUMENT".to_string(),
             stage: None,
         });
+        assert!(!parsed_document_requires_ocr(&parsed));
+        parsed.pages[0].requires_visual_processing = true;
         assert!(parsed_document_requires_ocr(&parsed));
         parsed.source_type = SourceType::OcrText;
         assert!(!parsed_document_requires_ocr(&parsed));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mixed_pdf_reuses_existing_whole_document_ocr_lineage() {
+        let mut pdf = Document::load_mem(&image_only_pdf()).unwrap();
+        let first = *pdf.get_pages().values().next().unwrap();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let content = pdf.add_object(Stream::new(
+            Dictionary::new(),
+            b"BT /F1 12 Tf 72 720 Td (Readable contract terms.) Tj ET".to_vec(),
+        ));
+        let page = pdf.get_object_mut(first).unwrap().as_dict_mut().unwrap();
+        page.set("Contents", content);
+        page.set(
+            "Resources",
+            dictionary! { "Font" => dictionary! { "F1" => font } },
+        );
+        let mut source = Vec::new();
+        pdf.save_to(&mut source).unwrap();
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("mixed.pdf");
+        fs::write(&path, &source).unwrap();
+        let mut conn = db::init_db(":memory:").unwrap();
+        let (document, received) = prepare_pdf_ingestion(path.to_str().unwrap(), None).unwrap();
+        let root = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        let parsed = crate::pipeline::parser::parse_document(
+            &mut conn,
+            &PdfExtractParser::new(),
+            &root.run_id,
+        )
+        .unwrap();
+        assert_eq!(parsed.pages.len(), 2);
+        assert!(!parsed.pages[0].requires_visual_processing);
+        assert!(parsed.pages[1].requires_visual_processing);
+        assert!(parsed.warnings.is_empty());
+        assert!(parsed_document_requires_ocr(&parsed));
+        let provider = live_provider();
+        let handoff =
+            prepare_handoff(&mut conn, &root.run_id, directory.path(), &provider).unwrap();
+        assert_eq!(handoff.source_bytes, source);
+        assert_eq!(handoff.source_sha256, document.content_hash);
+        let transport = LostAckTransport::default();
+        *transport.completed.lock().unwrap() = Some(completed_status(&handoff));
+        let child = process_scanned_document_with(
+            &mut conn,
+            &root.run_id,
+            directory.path(),
+            &provider,
+            &transport,
+            &UNCONTROLLED_EXECUTION,
+        )
+        .unwrap();
+        let root_state = db::get_pipeline_run(&conn, &root.run_id).unwrap().unwrap();
+        assert_eq!(
+            crate::pipeline::service::continuation_plan(
+                &conn,
+                &root.run_id,
+                root_state.state_version
+            )
+            .unwrap_err()
+            .code(),
+            "CONTINUATION_NOT_ALLOWED"
+        );
+        assert_eq!(
+            db::get_parsed_document(&conn, &root.run_id)
+                .unwrap()
+                .unwrap(),
+            parsed
+        );
+        let derived = crate::pipeline::parser::parse_document(
+            &mut conn,
+            &crate::pipeline::parser::TaggedOcrParser::new(),
+            &child,
+        )
+        .unwrap();
+        assert_eq!(derived.source_type, SourceType::OcrText);
+        assert_eq!(derived.pages.len(), parsed.pages.len());
+        assert!(!parsed_document_requires_ocr(&derived));
+        let calls = transport.calls.lock().unwrap().clone();
+        assert_eq!(
+            process_scanned_document_with(
+                &mut conn,
+                &root.run_id,
+                directory.path(),
+                &provider,
+                &transport,
+                &UNCONTROLLED_EXECUTION
+            )
+            .unwrap(),
+            child
+        );
+        assert_eq!(*transport.calls.lock().unwrap(), calls);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ocr_handoffs", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
