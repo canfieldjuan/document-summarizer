@@ -1830,9 +1830,13 @@ mod tests {
 
     #[test]
     fn durable_ocr_admission_preserves_native_source_and_identity_checks() {
-        let pdf = save_pdf(build_pdf(vec![FixturePage::ImageOnly]));
+        let scanned = save_pdf(build_pdf(vec![FixturePage::ImageOnly]));
+        let readable = save_pdf(build_pdf(vec![FixturePage::Text(
+            b"Readable terms.".to_vec(),
+        )]));
         for case in [
             "valid",
+            "readable-only",
             "source-size",
             "source-bytes",
             "source-digest",
@@ -1841,6 +1845,11 @@ mod tests {
             "state",
             "source-type",
         ] {
+            let pdf = if case == "readable-only" {
+                &readable
+            } else {
+                &scanned
+            };
             let mut conn = db::init_db(":memory:").unwrap();
             let run = if case == "source-type" {
                 let (document, run) = prepare_pdf_ingestion_with_source_type(
