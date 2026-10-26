@@ -396,24 +396,20 @@ pub(crate) fn prepare_ocr_handoff(
     let parsed = get_parsed_document(&tx, admission.root_run_id)?.ok_or_else(|| {
         StoreError::InvalidOcrHandoff("the native parse result is missing".to_string())
     })?;
-    let whole_document_scan = parsed
-        .warnings
-        .iter()
-        .any(|warning| warning.code == "NO_NATIVE_TEXT_IN_DOCUMENT");
     let source_size = u64::try_from(admission.source_bytes.len()).map_err(|_| {
         StoreError::InvalidOcrHandoff("the source snapshot is too large".to_string())
     })?;
     if root.state != PipelineState::Parsed
         || root.document_id != admission.root_document_id
         || document.source_type != SourceType::NativeText
-        || !whole_document_scan
+        || !parsed.requires_ocr()
         || source_size != document.byte_size
         || sha256_hex(admission.source_bytes) != document.content_hash
         || admission.source_sha256 != document.content_hash
         || admission.provider_app_id != "document-ocr"
     {
         return Err(StoreError::InvalidOcrHandoff(
-            "the root document is not an exact admitted whole-document scan".to_string(),
+            "the root document is not an exact admitted native source requiring OCR".to_string(),
         ));
     }
     let request_sha256 = sha256_hex(admission.provider_request_json.as_bytes());
