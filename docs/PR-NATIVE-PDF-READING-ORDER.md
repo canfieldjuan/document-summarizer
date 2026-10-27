@@ -80,3 +80,7 @@ NOT DONE: contract and diagnostic evidence only. Production checkout remains unc
 ## Operator acceptance
 
 Accepted verbatim: "i accepy". Accepted contract SHA256 09e7b5a912cf29927a34c7678d341d2014cee80278a9a6fb2cec186ade9de20e. Oversight contract PASS: ad932fd4. This acceptance does not change its geometry-sufficiency stop rule.
+
+## Geometry-sufficiency gate result
+
+STOP: public twin PDFs produce identical OutputDev events but different pinned-reference line grouping because resolved font descent is absent from the callback. See durable evidence alias c9-native-layout-parity-20261027, geometry-stop-manifest.json SHA256 5bdaee18662d68871dffce5cd1d98b465b2d9b274335042342b72549e962cebc. The public drawing-order regression fails as expected; the interface-collision characterization passes. Production remains unchanged. Contract r2 requires amended scope before a decoder/interface change; no model run or repair adoption is allowed by this result.
