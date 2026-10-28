@@ -1,0 +1,67 @@
+{
+  "alias": "base14-conflict-Helvetica-BoldOblique",
+  "pdf_sha256": "b6a673fe9047573a4409c251ede37c7b4c7d6a97133fedff7451512ca1094c78",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Helvetica-BoldOblique",
+          "adv": 8.664,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 717.516,
+          "x1": 80.664,
+          "y1": 729.516,
+          "top": 62.48400000000004,
+          "bottom": 74.48400000000004,
+          "doctop": 62.48400000000004,
+          "width": 8.664000000000001,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            80.664,
+            720.0
+          ],
+          "fontname": "Helvetica-BoldOblique",
+          "adv": 8.664,
+          "upright": true,
+          "x0": 80.664,
+          "y0": 717.516,
+          "x1": 89.328,
+          "y1": 729.516,
+          "top": 62.48400000000004,
+          "bottom": 74.48400000000004,
+          "doctop": 62.48400000000004,
+          "width": 8.664000000000001,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

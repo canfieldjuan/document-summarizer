@@ -1,0 +1,67 @@
+{
+  "alias": "base14-conflict-Arial,BoldItalic",
+  "pdf_sha256": "ee6ffb2c0c79c043c36bda10b7ff4c92ff4080f3a0b8c5dd781909487f9c4776",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Helvetica-BoldOblique",
+          "adv": 8.664,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 717.516,
+          "x1": 80.664,
+          "y1": 729.516,
+          "top": 62.48400000000004,
+          "bottom": 74.48400000000004,
+          "doctop": 62.48400000000004,
+          "width": 8.664000000000001,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            80.664,
+            720.0
+          ],
+          "fontname": "Helvetica-BoldOblique",
+          "adv": 8.664,
+          "upright": true,
+          "x0": 80.664,
+          "y0": 717.516,
+          "x1": 89.328,
+          "y1": 729.516,
+          "top": 62.48400000000004,
+          "bottom": 74.48400000000004,
+          "doctop": 62.48400000000004,
+          "width": 8.664000000000001,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

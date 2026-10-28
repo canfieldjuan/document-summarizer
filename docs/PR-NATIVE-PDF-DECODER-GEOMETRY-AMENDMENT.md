@@ -1,6 +1,6 @@
 # Proposed r4 amendment: preserve geometry at the decoder owner
 
-Status: ACCEPTED revision 4 after oversight CONTRACT PASS 540120ba and explicit operator acceptance below. Implementation is blocked at the mandatory exact-commit licence-notice prerequisite; no dependency or production delta has been written.
+Status: ACCEPTED revision 4. The operator-approved metadata-derived licence notice cleared A4. A local opt-in geometry candidate is implemented, but Phase A stopped at a newly proven lopdf decimal-precision gap. Application adoption and all holds remain blocked.
 
 ## Root cause and evidence
 
@@ -73,7 +73,7 @@ No full extraction-library replacement, Python runtime or sidecar, new service/c
 
 A compatible geometry extension is a proposed implementation, not proven sufficient. Maintaining a vendored patch is a real cost. The existing library also has differences outside the exposed callback; Phase A must identify any such difference needed for the enumerated public cases rather than silently broadening this patch. Archive provenance is now verified; the missing exact-commit MIT notice and retained Adobe AFM notice must be established before writing the dependency delta. The r2 STOP remains in force until this amendment is independently reviewed and explicitly accepted.
 
-## Implementation summary / cold diff / gap audit
+## Contract-time implementation summary / cold diff / gap audit (historical)
 
 NOT DONE. This amendment and source inventory are documentation only. No dependency, parser, runtime or test behavior changed. A1–A4 are contract corrections only; archive integrity was checked without extracting or changing source files. The preserved public evidence establishes why the earlier interface is insufficient, not that this extension works. The next implementation action after acceptance is fixture/reference freezing and verified vendor staging, followed by fail-first geometry tests.
 
@@ -90,3 +90,32 @@ Independent offline preparation: `r4-public-reference/manifest.json` SHA256 5e00
 ## A4 operator-authorized resolution
 
 Operator approved the metadata-derived notice: "Approve the license notice." Verified against the human message at 2026-10-28T18:57:04.041Z; relayed in oversight77c90c7a. The vendored package will carry canonical MIT text with `Copyright (c) Jeff Muizelaar and the pdf-extract contributors`, with no invented year. PROVENANCE.md records its derivation from the package MIT declaration/authors and the missing upstream notice, plus the exact VCS/archive/source pins. Preserve the complete pinned Adobe AFM notice. This replaces only A4's unavailable-upstream-notice stop. Other r4 gates remain. No upstream issue is authorized.
+
+## Phase A candidate result
+
+NOT DONE. The local dependency candidate adds resolved font metrics, raw glyph bounds,
+vertical displacement, text advances and inherited page rotation behind an opt-in path.
+Default native extraction still uses legacy callbacks; the application has not adopted
+reading-order assembly or a new parser identity. The 90-PDF serialized legacy baseline
+is byte-identical. The base-font test and original descent-twin test pass; zeroing descent
+propagation kills the latter, and restoring the exact source makes it pass again.
+
+The full 87-case public geometry comparison fails: 30 numeric fields differ across
+Type3 scaling and decimal-coordinate cases. Reference text assembly on those candidate
+glyphs matches the original matrix, but a separate public boundary pair proves a real
+text-changing collision: 717.00000 and 716.99999 become the same f32 coordinate while
+reference text is `A B` versus `A\nB`. The explicit fail-first regression confirms
+identical complete enriched glyph records. Origin: lopdf parser/mod.rs:99–110 and
+object.rs:42, before this interface. No tolerance was loosened. R4 requires stopping
+before expanding to that second library. The r5 numeric-precision proposal is unaccepted.
+
+Two defects in this unpublished candidate were fixed locally: reusing the legacy glyph-name
+width keys mishandled ZapfDingbats (corrected to the pinned reference Unicode keys), and
+re-parsing the legacy JSON snapshot rounded a float in the comparator (corrected to exact
+serialized-byte comparison). These were implementation/test rework, not model findings.
+No downstream special-case filters were added. Legacy lookup data remains unchanged.
+
+Focused regression evidence, format and Clippy completed; Clippy still reports inherited
+vendor warnings. Phase A is not a PASS. Remaining public coverage, application assembly,
+identity/persistence, original-PDF parity, dependency/writer/C9/SAME60 and platform CI are
+not complete. No push, installation, model/OCR run or held-stack merge occurred.

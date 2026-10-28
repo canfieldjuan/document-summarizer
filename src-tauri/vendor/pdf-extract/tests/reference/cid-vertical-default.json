@@ -1,0 +1,67 @@
+{
+  "alias": "cid-vertical-default",
+  "pdf_sha256": "47bddccef73a5de93131391beeca6ace6525667e2edf913e34d793bdc5523ad8",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "PublicGeometry",
+          "adv": -12.0,
+          "upright": true,
+          "x0": 66.0,
+          "y0": 709.44,
+          "x1": 78.0,
+          "y1": 721.44,
+          "top": 70.55999999999995,
+          "bottom": 82.55999999999995,
+          "doctop": 70.55999999999995,
+          "width": 12.0,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            707.4
+          ],
+          "fontname": "PublicGeometry",
+          "adv": -12.0,
+          "upright": true,
+          "x0": 66.0,
+          "y0": 696.84,
+          "x1": 78.0,
+          "y1": 708.84,
+          "top": 83.15999999999997,
+          "bottom": 95.15999999999997,
+          "doctop": 83.15999999999997,
+          "width": 12.0,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "A\nB"
+    }
+  ]
+}
