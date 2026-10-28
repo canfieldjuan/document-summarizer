@@ -1,6 +1,6 @@
 # Proposed r4 amendment: preserve geometry at the decoder owner
 
-Status: PROPOSED revision 4; incorporates oversight da36cec1 with the A2 source correction below. Requires independent contract review and operator acceptance. No dependency or production edit is authorized yet.
+Status: ACCEPTED revision 4 after oversight CONTRACT PASS 540120ba and explicit operator acceptance below. Implementation is blocked at the mandatory exact-commit licence-notice prerequisite; no dependency or production delta has been written.
 
 ## Root cause and evidence
 
@@ -76,3 +76,13 @@ A compatible geometry extension is a proposed implementation, not proven suffici
 ## Implementation summary / cold diff / gap audit
 
 NOT DONE. This amendment and source inventory are documentation only. No dependency, parser, runtime or test behavior changed. A1–A4 are contract corrections only; archive integrity was checked without extracting or changing source files. The preserved public evidence establishes why the earlier interface is insufficient, not that this extension works. The next implementation action after acceptance is fixture/reference freezing and verified vendor staging, followed by fail-first geometry tests.
+
+## Operator acceptance
+
+Accepted verbatim: "I accept revision 4, including the pinned licence-text fetch. Let’s implement it and run the offline parity tests.". Reviewed r4 SHA256 e0fe7e52069dd32de11dbf4755f055977866fb179aff336f7c98864583322ab7. Oversight CONTRACT PASS 540120ba.
+
+## Accepted-scope execution: licence prerequisite STOP
+
+The exact upstream commit tree is untruncated and has no licence/notice path. The repository licence endpoint with that exact ref returns HTTP 404. The verified cached package declares MIT but contains no full MIT notice. Per A4, vendoring stopped; no copyright attribution was invented. Durable evidence alias `c9-native-layout-parity-20261027/licence-stop-r4.json`, SHA256 7b825d22a2daf839658023820c6fc743b699a08374da6365c6777cc95040f9bc. The missing input is an authoritative copyright/licence notice reconciled to the pinned upstream commit. A changed provenance procedure requires a separately reviewed scope decision.
+
+Independent offline preparation: `r4-public-reference/manifest.json` SHA256 5e008b5d79ccb8f3190adfa652f8bda9aec9edf913f3bffef93db25d24024b2c freezes 16 public A2/A3 cases after checking 52 reference source hashes. It records exact text and raw glyphs for MissingWidth defaults and page transforms. This is a partial reference fixture batch, not native parity or the completed Phase A. Further public cases, legacy compatibility, decoder implementation and all application/private parity gates remain NOT DONE. No production code, dependency, parser identity or model setting changed; no model/OCR calls ran.
