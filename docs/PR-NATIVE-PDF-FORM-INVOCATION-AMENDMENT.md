@@ -168,3 +168,13 @@ test, frozen input, application setting or dependency changed. No code tests are
 rerun for this documentation-only proposal; the results above remain bound to
 their recorded r5 head. The next authorized step is contract review, followed by
 operator acceptance before fail-first fixtures and implementation.
+
+## Acceptance record
+
+Juan accepted the frozen proposal above (SHA256 46534287658e7f46ddbb5b247f753cea5b5c3803f001a9467e18ccbc9a07cba5)
+verbatim: **“I accept r6, including errors for cyclic or malformed Forms. Let’s implement it and run the offline tests, keeping existing defaults unchanged.”**
+Oversight CONTRACT PASS: `e7a63d12`. Binding malformed-invocation coverage
+includes missing/wrong-type Do operands, missing XObject entries and dangling
+references: return an error, never panic or return a successful partial page.
+The durable receipt is `operator-acceptance-r6.json`. No implementation is
+contained in this acceptance record.
