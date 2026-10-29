@@ -1,6 +1,6 @@
 # Proposed r6: preserve Form invocation context at the decoder
 
-Status: CONTRACT ONLY; not accepted and not implemented. Based on local r5
+Status: ACCEPTED; implemented locally with offline evidence below. Based on local r5
 `8ffa475ca8f3324681e04951c28659993c936417`. Oversight mail `bc000a45`
 independently confirms the Form STOP, not an implementation PASS for r5.
 The r5 implementation still needs its own draft PR and exact-head review.
@@ -178,3 +178,94 @@ includes missing/wrong-type Do operands, missing XObject entries and dangling
 references: return an error, never panic or return a successful partial page.
 The durable receipt is `operator-acceptance-r6.json`. No implementation is
 contained in this acceptance record.
+
+## r6 implementation and offline proof
+
+The opt-in geometry path now enters Forms through one invocation owner in
+`vendor/pdf-extract/src/lib.rs`: it resolves the target, distinguishes subtype,
+validates the Matrix/resources, composes the supplied caller CTM, and creates
+fresh child state. The shared operator engine suspends parent frames explicitly.
+Canonical stream IDs are tracked only on the active path, rejecting cycles while
+allowing repeated sequential use. No fixed nesting/page cap was added.
+The geometry Tf branch now reports missing resource/font entries as errors
+instead of panicking or borrowing a parent's cached font. The legacy branch
+retains its prior behavior. No downstream compensation was introduced or found
+that needed removal; the context-losing geometry recursion itself was replaced.
+
+Reproduce → isolate → explain → fix → prove → prevent regression:
+
+1. Preserve the earlier transformed-Form failure (28 fields), then freeze the
+   new reference controls before source edits. The direct-empty Resources
+   regression panicked on missing Font. Malformed-invocation controls either
+   panicked at operand/reference lookup or incorrectly returned success with
+   invalid Matrix/resources. These outputs are retained, not rewritten.
+2. The first loss is the inherited Do entry, not glyph assembly: it previously
+   discarded caller CTM, ignored Matrix/Subtype and used unsafe lookup helpers.
+   Direct-empty resources also chose the empty dictionary instead of the
+   caller. Indirect-empty was already correct and remains a positive control.
+3. Repair this owner and move invocation state into explicit frames while
+   retaining one operator implementation. The collector already propagates
+   extraction failure before returning the page; error tests exercise that
+   boundary, including failure after valid glyphs.
+4. On the final source: all 87 original geometry cases, 19 new reference Form
+   cases and 4 continuation page cases match the frozen geometry and text.
+   The 21 native-policy malformed/cycle fixtures return errors without panic or
+   successful partial pages. Additional falsy/default checks reject invalid
+   values and accept an all-zero Matrix. Repeated traversal of a 4096-level
+   acyclic Form chain succeeds without host-stack recursion.
+5. The adjacent parser suite passes: 47 passed, 0 failed, 5 held ignored. The
+   original continuation test is explicitly run despite its held marker and
+   passes. The 90-PDF legacy compatibility snapshot remains byte-identical.
+   Format and Clippy pass, with inherited vendor warnings. Platform CI and
+   independent implementation review have not run for this local candidate.
+6. Seven deliberate mutants are killed: omitted caller CTM, omitted Form
+   Matrix, leaked child text state, parent-resource substitution, Image bytes
+   parsed as operators, cycle returning partial success, and disabled cycle
+   rejection. The last is compiled first and killed by a bounded execution
+   timeout. Exact source is restored afterwards. These runs predate only the
+   separately proven gs dispatch correction described below; their source hash
+   and logs are retained. No claim of independent review is made.
+
+### Own defects found and corrected before publication
+
+* The copied r5 scoring script used `utils.extract_text`, not the Page textmap
+  path of the frozen `page.extract_text()` reference. A mixed-orientation Form
+  exposed that difference even when the scorer received the reference's own
+  glyphs. `r6-scorer-reproduction.json` preserves both wrong-helper results.
+  The r6 scorer now calls the exact pinned Page assembly path and first proves
+  it reproduces every frozen page from reference glyphs, then scores candidate
+  glyphs. Frozen expected text and decoder output were not changed. Earlier
+  r5 evidence/scripts remain immutable; rechecking the original matrix through
+  the corrected path still yields zero differences.
+* The uncommitted mechanical state refactor accidentally renamed the literal
+  `gs` operator to `frame.gs`. Cold diff review found it. A new fail-first
+  regression showed its pre-existing validation was silently skipped. Restoring
+  `gs` makes the valid/invalid controls pass on both legacy and geometry paths;
+  a complete comparison of operator names against the base now matches. This
+  is our local rework, not an upstream bug. General ExtGState validation was
+  not redesigned. The initial cycle-disabled mutant also failed to compile
+  because removing insertion removed type inference; the corrected mutant
+  keeps insertion and disables only rejection, and is killed at execution.
+
+### Cold diff audit
+
+| Owner | Change | Evidence |
+|---|---|---|
+| pdf-extract lib.rs invocation frame / Do / geometry Tf | Preserve source-owned transform/resources/state; typed errors; bounded active-path execution; unchanged legacy branch | frozen geometry, native errors, deep/repeated traversal, mutants, legacy snapshot |
+| parser_layout_tests.rs and new tests/forms fixtures | Public fail-first inputs plus sibling/error/default controls; gs dispatch regression | adjacent parser suite and independent continuation invocation |
+| PROVENANCE.md and this amendment | Record maintenance boundary, observed proof and remaining holds | documentation-only; no new runtime behavior |
+
+### Gap audit
+
+DONE locally: the accepted r6 source repair and offline regression/parity gates.
+NOT DONE overall: independent r5/r6 implementation review, platform CI,
+application reading-order adoption/identity and saved-artifact immutability,
+original private-PDF parity, and downstream writer/dependency/C9/SAME60 gates.
+No model/OCR calls, production adoption, installation or held-stack merge.
+
+Evidence aliases under `c9-native-layout-parity-20261027/`:
+`r6-form-reference/manifest.json`, `r6-direct-empty-before.log`,
+`r6-malformed-before.log`, `r6-continuation-after.log`, `r6-parser-final.log`,
+`r6-results/parity-score.json`, `r6-mutation-results.json`,
+`r6-gs-dispatch-before.log`, `r6-operator-inventory.json`, and `r6-result.json`.
+The final receipt binds the exact source snapshot, these logs and their hashes.

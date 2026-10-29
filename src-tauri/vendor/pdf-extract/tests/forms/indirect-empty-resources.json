@@ -1,0 +1,18 @@
+{
+  "alias": "indirect-empty-resources",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "93028d40fd95b74b341c4cd28cbefd7f38a8c7d636a2026599692a077440253b"
+}
