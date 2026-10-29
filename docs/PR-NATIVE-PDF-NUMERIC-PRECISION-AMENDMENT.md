@@ -1,7 +1,8 @@
-# Proposed r5: retain decimal precision at the PDF object reader
+# Accepted r5: retain decimal precision at the PDF object reader
 
-Status: PROPOSED, NOT ACCEPTED. This document does not authorize a second
-dependency patch. Accepted r4 reached its mandatory new-decoder-gap STOP.
+Status: ACCEPTED and implemented locally. The numeric parity repair passes;
+overall Phase A remains stopped on a separately reproduced Form-transform gap.
+The frozen accepted proposal and its hash are preserved in the acceptance record.
 
 ## Inventory and root cause
 
@@ -135,3 +136,77 @@ The frozen proposal above (SHA256 ba9ca99c9e77e8a9005dbaa476d1d7c31ff450c345d55d
 Binding reader inventory before implementation includes both decimal-token grammars; direct-object, indirect-object, compressed-object, and content-stream entry points; and every pdf-extract numeric accessor. The additional `common_data_structures/mod.rs:75,99` direct-object callers are legacy decoder tests and remain covered. All remaining 30 raw-geometry differences stay visible until individually cleared or explained. No tolerance change, legacy-default change, model call, application adoption, or merge hold is authorized by this acceptance.
 
 This acceptance record contains no implementation. The durable operator receipt is `operator-acceptance-r5.json`.
+
+## r5 implementation and offline proof
+
+The opt-in loader now preserves original decimal tokens as Real64 through nested
+objects, stream dictionaries, inherited attributes, compressed objects, deferred
+decryption, and content operators. Default loads and From<f64> still use Real(f32).
+A private-construction PreciseDocument wrapper owns the geometry entry point;
+the shared content dispatch also rejects a geometry callback on a legacy document,
+using the reader's stored precision marker. No text re-scan or tolerance change.
+
+The original 87-case geometry matrix has zero differences; all 30 previously
+reported numeric fields are cleared. The pinned reference assembly on candidate
+glyphs has zero text differences. The exact boundary twins yield `A B` and `A\nB`.
+The 90-PDF legacy snapshot remains byte-identical, including its previously
+recorded ZapfDingbats error. The adjacent parser suite reports 40 passed, 0 failed,
+5 explicitly held probes ignored. Format and Clippy pass (inherited vendor warnings).
+The compile-time wrapper negative/positive probes and its documented example pass.
+
+Reproduction and regression sequence:
+
+1. Preserved pre-r5 public collision and raw numeric failures identify the f32
+   token owner (lopdf parser/mod.rs real). The source, not the model, lost digits.
+2. Add the selected precision at that owner and carry it with the document and
+   content decode. Both application and pdf-extract use one pinned local lopdf.
+3. Run unchanged geometry/text/legacy proof and nested/compressed/error controls.
+4. Remove content precision propagation: the boundary regression fails, observing
+   717.0 instead of 716.99999. Restore the exact source: it passes.
+5. Two defects in this unpublished implementation were reproduced and corrected:
+   Real64 serialization lost negative zero (decimal-token serialization now
+   preserves it); public geometry callbacks could bypass the wrapper (shared
+   geometry dispatch now consumes the reader's precision marker). Both regressions
+   failed before their fixes and pass in the final parser suite. No published
+   introducing commit exists; these were local implementation rework.
+6. A test initially assumed adjacent decimal operands are rejected. Existing
+   grammar accepts them and treats `e` as an operator, not an exponent. Tests now
+   assert the unchanged tokenization; the parser grammar was not tightened.
+
+## Cold diff audit
+
+| File / owner | Actual change and contract trace | Proof |
+|---|---|---|
+| Cargo.toml / Cargo.lock | Single local lopdf 0.42.0 patch; no transitive changes | locked offline builds |
+| vendor/lopdf source / PROVENANCE.md / LICENSE | Archive-pinned source, original MIT notice; nine source files changed | pristine manifest and separate delta |
+| load_options.rs / lib.rs | Explicit default-Legacy enum and opt-in option/export | interleaved load controls |
+| parser/mod.rs | One real-token lexer, selected representation propagated through object/content grammars | public boundary, nested object and strict/error controls |
+| reader.rs / document.rs / object_stream.rs | Store selected precision and preserve it across all compressed/deferred readers | nested/compressed and deferred-decryption tests |
+| object.rs / writer.rs | Explicit Real64 access/type/debug/serialization; f32 accessors reject it | round-trip, signed-zero and nonfinite serialization tests |
+| parser_aux.rs | Explicit content APIs and document-owned mode | content and page decode tests |
+| vendor/pdf-extract lib.rs / geometry.rs | Non-narrowing accessors, precise wrapper and dispatch marker check | geometry parity, callback negative, compile-time boundary |
+| parser_layout_tests.rs / public continuation fixtures | Preserve old freeze; add precision and continuation proofs | parser suite plus explicit continuation failure |
+
+Legacy CMap metadata dictionary helpers remain on their original representation;
+they do not decode page/font geometry. Existing legacy width tables, OCR selection,
+application parser identity, prompts/model settings, and saved artifacts are unchanged.
+No older downstream workaround was added or retained to mask numeric loss.
+
+## New Phase A STOP: Form transforms
+
+The frozen supplementary public probe reports 28 differing raw fields, all in
+`transformed-form`. Ordinary transformed content and actual page continuation
+match. Origin: pdf-extract Processor::process_stream's `Do` branch re-enters the
+processor without passing the caller's CTM or reading the Form's Matrix. Its new
+GraphicsState starts from initial_ctm. This behavior existed in the pristine
+upstream source; our f454b28 enriched candidate inherited it. The public fixture
+includes independent caller translation and Form scaling/translation, so neither
+can pass by coincidence. No Form repair or downstream coordinate compensation
+is included in r5. This is the accepted r4/r5 new-decoder-behavior stop.
+
+**Gap audit: NOT DONE overall.** Numeric repair and its offline proofs pass.
+Full Phase A, application adoption, original private-PDF parity, identity/storage,
+dependency/writer/C9/SAME60, platform qualification, and independent implementation
+review remain incomplete. No model/OCR calls, installation, push or merge.
+
+Durable evidence alias: `c9-native-layout-parity-20261027/r5-result.json`.

@@ -52,9 +52,12 @@ fn native_reading_order_matches_visual_rows() {
 }
 
 #[derive(Default)]
-struct LayoutEvents(Vec<serde_json::Value>);
+struct LayoutEvents(Vec<serde_json::Value>, bool);
 
 impl pdf_extract::OutputDev for LayoutEvents {
+    fn wants_geometry(&self) -> bool {
+        self.1
+    }
     fn begin_page(
         &mut self,
         page: u32,
@@ -249,7 +252,9 @@ fn decoder_geometry_retains_descent() {
         ("same-descent", -200.0, 717.6),
         ("different-descent", -800.0, 710.4),
     ] {
-        let document = PdfDocument::load(root.join(format!("{alias}.pdf"))).unwrap();
+        let document =
+            pdf_extract::geometry::PreciseDocument::load(root.join(format!("{alias}.pdf")))
+                .unwrap();
         let page = pdf_extract::geometry::extract_page_geometry(&document, 1).unwrap();
         assert_eq!(page.glyphs[1].text, "B");
         assert_eq!(page.glyphs[1].descent, descent);
@@ -258,16 +263,43 @@ fn decoder_geometry_retains_descent() {
 }
 
 #[test]
-#[ignore = "accepted r4 STOP: lopdf decimal precision loses the reference line boundary"]
 fn decoder_precision_preserves_line_boundary() {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/precision-collision");
     let mut traces = Vec::new();
+    let mut pages = Vec::new();
     for alias in ["at-boundary", "over-boundary"] {
-        let document = PdfDocument::load(root.join(format!("{alias}.pdf"))).unwrap();
+        let document =
+            pdf_extract::geometry::PreciseDocument::load(root.join(format!("{alias}.pdf")))
+                .unwrap();
         let geometry = pdf_extract::geometry::extract_page_geometry(&document, 1).unwrap();
         println!("{alias}: glyph B matrix y={}", geometry.glyphs[1].matrix[5]);
+        let expected_y = if alias == "at-boundary" {
+            717.0
+        } else {
+            716.99999
+        };
+        assert_eq!(geometry.glyphs[1].matrix[5], expected_y);
+        let chars: Vec<_> = geometry
+            .glyphs
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "text": g.text, "x0": g.bounds[0], "x1": g.bounds[2],
+                    "top": 792.0-g.bounds[3], "bottom": 792.0-g.bounds[1],
+                    "doctop": 792.0-g.bounds[3], "upright": g.upright, "size": g.size,
+                })
+            })
+            .collect();
+        pages.push(serde_json::json!({"alias": alias, "chars": chars}));
         traces.push(format!("{:?}", geometry.glyphs));
+    }
+    if let Some(output) = std::env::var_os("DOC_SUM_LAYOUT_PROBE_OUTPUT") {
+        fs::write(
+            Path::new(&output).join("precision-boundary-geometry.json"),
+            serde_json::to_vec_pretty(&pages).unwrap(),
+        )
+        .unwrap();
     }
     assert_ne!(
         traces[0], traces[1],
@@ -275,8 +307,19 @@ fn decoder_precision_preserves_line_boundary() {
     );
 }
 
+#[test]
+#[ignore = "explicit Phase A transformed-content/page-continuation qualification"]
+fn decoder_geometry_continuation_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/continuation");
+    compare_geometry_root(&root, None);
+}
+
 fn compare_frozen_geometry(prefix: Option<&str>) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/reference");
+    compare_geometry_root(&root, prefix);
+}
+
+fn compare_geometry_root(root: &Path, prefix: Option<&str>) {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
     let tolerance = manifest["geometry_comparison"]["absolute_tolerance"]
@@ -291,61 +334,71 @@ fn compare_frozen_geometry(prefix: Option<&str>) {
         }
         let reference: serde_json::Value =
             serde_json::from_slice(&fs::read(root.join(format!("{alias}.json"))).unwrap()).unwrap();
-        let document = PdfDocument::load(root.join(format!("{alias}.pdf"))).unwrap();
-        let geometry = pdf_extract::geometry::extract_page_geometry(&document, 1).unwrap();
-        let page = &reference["pages"][0];
-        let expected = page["chars"].as_array().unwrap();
-        assert_eq!(
-            geometry.glyphs.len(),
-            expected.len(),
-            "{alias}: glyph count"
-        );
-        let [x0, y0, x1, y1] = geometry.media_box;
-        let (mb_x0, mb_top, height) = if geometry.rotation == 90 || geometry.rotation == 270 {
-            (y0.min(y1), -x0.max(x1) + (x1 - x0).abs(), (x1 - x0).abs())
-        } else {
-            (x0.min(x1), -y0.max(y1) + (y1 - y0).abs(), (y1 - y0).abs())
-        };
-        let mut chars = Vec::new();
-        for (index, (glyph, wanted)) in geometry.glyphs.iter().zip(expected).enumerate() {
-            let [left, bottom, right, top] = glyph.bounds;
-            let actual = serde_json::json!({
-                "text": glyph.text, "fontname": glyph.font_name, "matrix": glyph.matrix,
-                "x0": left+mb_x0, "x1": right+mb_x0, "y0": bottom, "y1": top,
-                "top": height-top+mb_top, "bottom": height-bottom+mb_top,
-                "doctop": height-top+mb_top, "width": right-left, "height": top-bottom,
-                "size": glyph.size, "adv": glyph.advance, "upright": glyph.upright,
-            });
-            for (key, value) in wanted.as_object().unwrap() {
-                if let Some(wanted) = value.as_f64() {
-                    let got = actual[key].as_f64();
-                    if !got.is_some_and(|got| got.is_finite() && (got - wanted).abs() <= tolerance)
-                    {
-                        differences.push(format!(
-                            "{alias}[{index}].{key}: expected={wanted} actual={got:?}"
-                        ));
-                    }
-                } else if key == "matrix" {
-                    for (i, value) in value.as_array().unwrap().iter().enumerate() {
-                        let wanted = value.as_f64().unwrap();
-                        let got = actual[key][i].as_f64().unwrap();
-                        if !got.is_finite() || (got - wanted).abs() > tolerance {
+        let document =
+            pdf_extract::geometry::PreciseDocument::load(root.join(format!("{alias}.pdf")))
+                .unwrap();
+        let mut initial_doctop = 0.0;
+        for page in reference["pages"].as_array().unwrap() {
+            let page_number = page["page_number"].as_u64().unwrap() as u32;
+            let geometry =
+                pdf_extract::geometry::extract_page_geometry(&document, page_number).unwrap();
+            let expected = page["chars"].as_array().unwrap();
+            assert_eq!(
+                geometry.glyphs.len(),
+                expected.len(),
+                "{alias}: glyph count"
+            );
+            let [x0, y0, x1, y1] = geometry.media_box;
+            let (mb_x0, mb_top, height) = if geometry.rotation == 90 || geometry.rotation == 270 {
+                (y0.min(y1), -x0.max(x1) + (x1 - x0).abs(), (x1 - x0).abs())
+            } else {
+                (x0.min(x1), -y0.max(y1) + (y1 - y0).abs(), (y1 - y0).abs())
+            };
+            let mut chars = Vec::new();
+            for (index, (glyph, wanted)) in geometry.glyphs.iter().zip(expected).enumerate() {
+                let [left, bottom, right, top] = glyph.bounds;
+                let actual = serde_json::json!({
+                    "text": glyph.text, "fontname": glyph.font_name, "matrix": glyph.matrix,
+                    "x0": left+mb_x0, "x1": right+mb_x0, "y0": bottom, "y1": top,
+                    "top": height-top+mb_top, "bottom": height-bottom+mb_top,
+                    "doctop": height-top+mb_top+initial_doctop, "width": right-left, "height": top-bottom,
+                    "size": glyph.size, "adv": glyph.advance, "upright": glyph.upright,
+                });
+                for (key, value) in wanted.as_object().unwrap() {
+                    if let Some(wanted) = value.as_f64() {
+                        let got = actual[key].as_f64();
+                        if !got
+                            .is_some_and(|got| got.is_finite() && (got - wanted).abs() <= tolerance)
+                        {
                             differences.push(format!(
-                                "{alias}[{index}].matrix[{i}]: expected={wanted} actual={got}"
+                                "{alias}[{index}].{key}: expected={wanted} actual={got:?}"
                             ));
                         }
+                    } else if key == "matrix" {
+                        for (i, value) in value.as_array().unwrap().iter().enumerate() {
+                            let wanted = value.as_f64().unwrap();
+                            let got = actual[key][i].as_f64().unwrap();
+                            if !got.is_finite() || (got - wanted).abs() > tolerance {
+                                differences.push(format!(
+                                    "{alias}[{index}].matrix[{i}]: expected={wanted} actual={got}"
+                                ));
+                            }
+                        }
+                    } else if actual[key] != *value {
+                        differences.push(format!(
+                            "{alias}[{index}].{key}: expected={value} actual={}",
+                            actual[key]
+                        ));
                     }
-                } else if actual[key] != *value {
-                    differences.push(format!(
-                        "{alias}[{index}].{key}: expected={value} actual={}",
-                        actual[key]
-                    ));
                 }
+                assert_eq!(glyph.occurrence, index);
+                chars.push(actual);
             }
-            assert_eq!(glyph.occurrence, index);
-            chars.push(actual);
+            actual_pages.push(
+                serde_json::json!({"alias": alias, "page_number": page_number, "chars": chars}),
+            );
+            initial_doctop += height;
         }
-        actual_pages.push(serde_json::json!({"alias": alias, "chars": chars}));
     }
     if let Some(output) = std::env::var_os("DOC_SUM_LAYOUT_PROBE_OUTPUT") {
         let output = Path::new(&output);
@@ -366,4 +419,300 @@ fn compare_frozen_geometry(prefix: Option<&str>) {
         differences.len(),
         differences.join("\n")
     );
+}
+
+// Public API coverage for the vendored numeric owner. Handwritten object bytes
+// ensure the writer cannot pre-round the values being tested.
+fn precision_fixture(compressed: bool) -> Vec<u8> {
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0.00001 -0.00001 612.00001 792.00001] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Probe 7 0 R /Contents 4 0 R >>".to_vec(),
+        b"<< /Length 24 >>\nstream\nBT 72 716.99999 Td (B) Tj\nendstream".to_vec(),
+        b"<< /Type /Font /Subtype /Type3 /FontMatrix [0.00100001 0 0 0.00200001 0 0] /Widths [716.99999] >>".to_vec(),
+        b"<< /Type /ObjStm /N 1 /First 4 /Length 61 >>\nstream\n7 0 << /Nested [716.99999 << /Negative -716.99999 /Zero -0.0 >>] >>\nendstream".to_vec(),
+        b"<< /Nested [716.99999 << /Negative -716.99999 /Zero -0.0 >>] >>".to_vec(),
+    ];
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    let mut offsets = vec![0usize];
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        if compressed && index == 6 {
+            continue;
+        }
+        // Calculate each stream's actual byte length independently of the literals.
+        let body = if let Some(start) = body.windows(7).position(|w| w == b"stream\n") {
+            let start = start + 7;
+            let end = body.windows(10).position(|w| w == b"\nendstream").unwrap();
+            let header = std::str::from_utf8(&body[..start - 7]).unwrap();
+            let length_start = header.find("/Length ").unwrap() + 8;
+            let length_end = length_start + header[length_start..].find(' ').unwrap();
+            let mut fixed = header.to_owned();
+            fixed.replace_range(length_start..length_end, &(end - start).to_string());
+            [fixed.as_bytes(), &b"stream\n"[..], &body[start..]].concat()
+        } else {
+            body.clone()
+        };
+        bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = bytes.len();
+    offsets.push(xref);
+    let mut entries = Vec::new();
+    for (id, offset) in offsets.iter().enumerate() {
+        let (kind, first, second): (u8, u32, u16) = if id == 0 {
+            (0, 0, 65535)
+        } else if compressed && id == 7 {
+            (2, 6, 0)
+        } else {
+            (1, *offset as u32, 0)
+        };
+        entries.push(kind);
+        entries.extend_from_slice(&first.to_be_bytes());
+        entries.extend_from_slice(&second.to_be_bytes());
+    }
+    bytes.extend_from_slice(format!("8 0 obj\n<< /Type /XRef /Size 9 /Root 1 0 R /Probe 716.99999 /W [1 4 2] /Length {} >>\nstream\n", entries.len()).as_bytes());
+    bytes.extend_from_slice(&entries);
+    bytes.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    bytes
+}
+
+#[test]
+fn decoder_precision_propagates_nested_and_compressed_objects_without_global_state() {
+    use lopdf::{LoadOptions, NumericPrecision, Object};
+    for compressed in [false, true] {
+        let input = precision_fixture(compressed);
+        for precision in [
+            NumericPrecision::Precise,
+            NumericPrecision::Legacy,
+            NumericPrecision::Precise,
+        ] {
+            let doc = PdfDocument::load_mem_with_options(
+                &input,
+                LoadOptions {
+                    numeric_precision: precision,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let expected = if precision == NumericPrecision::Precise {
+                716.99999
+            } else {
+                717.0
+            };
+            let nested = doc
+                .get_dictionary((7, 0))
+                .unwrap()
+                .get(b"Nested")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(nested[0].as_float64().unwrap(), expected);
+            assert_eq!(
+                nested[1]
+                    .as_dict()
+                    .unwrap()
+                    .get(b"Negative")
+                    .unwrap()
+                    .as_float64()
+                    .unwrap(),
+                -expected
+            );
+            assert!(nested[1]
+                .as_dict()
+                .unwrap()
+                .get(b"Zero")
+                .unwrap()
+                .as_float64()
+                .unwrap()
+                .is_sign_negative());
+            assert_eq!(
+                doc.trailer.get(b"Probe").unwrap().as_float64().unwrap(),
+                expected
+            );
+            let operands = doc.get_and_decode_page_content((3, 0)).unwrap().operations;
+            assert_eq!(operands[1].operands[1].as_float64().unwrap(), expected);
+            let matrix = doc
+                .get_dictionary((5, 0))
+                .unwrap()
+                .get(b"FontMatrix")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            let media = doc
+                .get_dictionary((2, 0))
+                .unwrap()
+                .get(b"MediaBox")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            if precision == NumericPrecision::Precise {
+                assert!(matches!(nested[0], Object::Real64(_)));
+                assert!(nested[0].as_f32().is_err());
+                assert!(nested[0].as_float().is_err());
+                assert_eq!(matrix[0].as_float64().unwrap(), 0.00100001);
+                assert_eq!(media[2].as_float64().unwrap(), 612.00001);
+            } else {
+                assert!(matches!(nested[0], Object::Real(_)));
+                assert_eq!(matrix[0].as_float().unwrap(), 0.00100001_f32);
+                assert_eq!(media[2].as_float().unwrap(), 612.00001_f32);
+            }
+        }
+    }
+    assert!(matches!(
+        lopdf::Object::from(716.99999_f64),
+        lopdf::Object::Real(717.0)
+    ));
+}
+
+#[test]
+fn decoder_precision_content_grammar_and_serialization() {
+    use lopdf::{content::Content, NumericPrecision, Object};
+    let bytes = b"+716.99999 -716.99999 -0.0 .12 10. [716.99999 << /A 0.00100001 >>] cm";
+    for precision in [NumericPrecision::Legacy, NumericPrecision::Precise] {
+        let content = Content::decode_strict_with_precision(bytes, precision).unwrap();
+        let operands = &content.operations[0].operands;
+        let expected = if precision == NumericPrecision::Precise {
+            716.99999
+        } else {
+            717.0
+        };
+        assert_eq!(operands[0].as_float64().unwrap(), expected);
+        assert_eq!(operands[1].as_float64().unwrap(), -expected);
+        assert!(operands[2].as_float64().unwrap().is_sign_negative());
+        assert_eq!(
+            operands[5].as_array().unwrap()[0].as_float64().unwrap(),
+            expected
+        );
+        let encoded = content.encode().unwrap();
+        let again = Content::decode_strict_with_precision(&encoded, precision).unwrap();
+        assert_eq!(
+            again.operations[0].operands[0].as_float64().unwrap(),
+            expected
+        );
+        if precision == NumericPrecision::Precise {
+            assert!(String::from_utf8(encoded)
+                .unwrap()
+                .starts_with("716.99999 -716.99999"));
+            assert_eq!(format!("{:?}", Object::Real64(716.99999)), "716.99999");
+        } else {
+            assert_eq!(
+                encoded,
+                Content::decode_strict(bytes).unwrap().encode().unwrap()
+            );
+        }
+        for malformed in [
+            b"--.12 cm".as_slice(),
+            b". cm",
+            b"[1.0 cm",
+            b"1.0 cm @",
+            b"1.0 cm 2.0",
+        ] {
+            assert!(
+                Content::decode_strict_with_precision(malformed, precision).is_err(),
+                "{malformed:?}"
+            );
+        }
+        // The existing grammar admits adjacent decimal operands and reads e as
+        // an operator, not exponent notation. Preserve that tokenization.
+        let adjacent = Content::decode_strict_with_precision(b"1.2.3 cm", precision).unwrap();
+        assert_eq!(adjacent.operations[0].operands.len(), 2);
+        let exponent = Content::decode_strict_with_precision(b"1e-5 cm", precision).unwrap();
+        assert_eq!(exponent.operations[0].operator, "e");
+        assert!(matches!(
+            exponent.operations[0].operands[0],
+            Object::Integer(1)
+        ));
+        assert!(Content::decode_strict_with_precision(b"", precision)
+            .unwrap()
+            .operations
+            .is_empty());
+    }
+}
+
+#[test]
+fn decoder_precision_serialization_preserves_negative_zero() {
+    use lopdf::{
+        content::{Content, Operation},
+        NumericPrecision, Object,
+    };
+    let content = Content {
+        operations: vec![Operation::new(
+            "cm",
+            vec![Object::Real64(-0.0), Object::Real64(717.0)],
+        )],
+    };
+    let encoded = content.encode().unwrap();
+    let decoded =
+        Content::decode_strict_with_precision(&encoded, NumericPrecision::Precise).unwrap();
+    assert!(matches!(decoded.operations[0].operands[0], Object::Real64(v) if v.is_sign_negative()));
+    assert!(matches!(
+        decoded.operations[0].operands[1],
+        Object::Real64(717.0)
+    ));
+    for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let invalid = Content {
+            operations: vec![Operation::new("cm", vec![Object::Real64(value)])],
+        };
+        assert!(invalid.encode().is_err());
+    }
+}
+
+#[test]
+fn decoder_precision_survives_deferred_decryption_of_object_streams() {
+    use lopdf::{
+        EncryptionState, EncryptionVersion, LoadOptions, NumericPrecision, Object, Permissions,
+    };
+    for precision in [NumericPrecision::Precise, NumericPrecision::Legacy] {
+        let mut doc = PdfDocument::load_mem_with_options(
+            &precision_fixture(true),
+            LoadOptions {
+                numeric_precision: precision,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        doc.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::string_literal("public-test-id"),
+                Object::string_literal("public-test-id"),
+            ]),
+        );
+        // Only the compressed object remains, so decrypt must use that reader.
+        doc.objects.remove(&(7, 0));
+        let state = EncryptionState::try_from(EncryptionVersion::V1 {
+            document: &doc,
+            owner_password: "public-owner",
+            user_password: "public-user",
+            permissions: Permissions::all(),
+        })
+        .unwrap();
+        doc.encrypt(&state).unwrap();
+        assert!(doc.decrypt("wrong-public-password").is_err());
+        doc.decrypt("public-user").unwrap();
+        let number = &doc
+            .get_dictionary((7, 0))
+            .unwrap()
+            .get(b"Nested")
+            .unwrap()
+            .as_array()
+            .unwrap()[0];
+        let expected = if precision == NumericPrecision::Precise {
+            716.99999
+        } else {
+            717.0
+        };
+        assert_eq!(number.as_float64().unwrap(), expected);
+    }
+}
+
+#[test]
+fn decoder_precision_legacy_callback_cannot_request_precise_geometry() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("vendor/pdf-extract/tests/precision-collision/over-boundary.pdf");
+    let legacy = PdfDocument::load(path).unwrap();
+    let error = output_doc_page(&legacy, &mut LayoutEvents(Vec::new(), true), 1).unwrap_err();
+    assert!(error.to_string().contains("precise document"));
 }

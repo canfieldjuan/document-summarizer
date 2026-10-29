@@ -33,11 +33,38 @@ pub struct PageGeometry {
     pub glyphs: Vec<GlyphGeometry>,
 }
 
+/// A document parsed from original bytes with precise decimal representation.
+/// Cannot be constructed from an already rounded legacy Document.
+///
+/// ```compile_fail
+/// let legacy = pdf_extract::Document::new();
+/// pdf_extract::geometry::extract_page_geometry(&legacy, 1).unwrap();
+/// ```
+pub struct PreciseDocument(Document);
+
+impl PreciseDocument {
+    pub fn load_mem(bytes: &[u8]) -> Result<Self, lopdf::Error> {
+        Document::load_mem_with_options(
+            bytes,
+            lopdf::LoadOptions {
+                numeric_precision: lopdf::NumericPrecision::Precise,
+                ..Default::default()
+            },
+        )
+        .map(Self)
+    }
+
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, OutputError> {
+        Ok(Self::load_mem(&std::fs::read(path)?)?)
+    }
+}
+
 /// Resolve one actual page. No text reordering, deduplication or app policy here.
 pub fn extract_page_geometry(
-    doc: &Document,
+    precise: &PreciseDocument,
     page_number: u32,
 ) -> Result<PageGeometry, OutputError> {
+    let doc = &precise.0;
     let object_id = *doc
         .get_pages()
         .get(&page_number)

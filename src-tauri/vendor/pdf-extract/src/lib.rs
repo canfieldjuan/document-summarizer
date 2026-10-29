@@ -244,6 +244,7 @@ impl<'a> FromObj<'a> for f64 {
         match obj {
             &Object::Integer(i) => Some(i as f64),
             &Object::Real(f) => Some(f.into()),
+            &Object::Real64(f) => Some(f),
             _ => None
         }
     }
@@ -1244,6 +1245,7 @@ fn as_num(o: &Object) -> f64 {
     match o {
         &Object::Integer(i) => { i as f64 }
         &Object::Real(f) => { f.into() }
+        &Object::Real64(f) => f,
         _ => { panic!("not a number") }
     }
 }
@@ -1592,7 +1594,15 @@ impl<'a> Processor<'a> {
     }
 
     fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
-        let content = Content::decode(&content).unwrap();
+        let content = if output.wants_geometry() {
+            if doc.numeric_precision() != lopdf::NumericPrecision::Precise {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                    "resolved geometry requires a precise document").into());
+            }
+            Content::decode_with_precision(&content, doc.numeric_precision())?
+        } else {
+            Content::decode(&content).unwrap()
+        };
         let mut gs: GraphicsState = GraphicsState {
             ts: TextState {
                 font: None,
@@ -1689,6 +1699,9 @@ impl<'a> Processor<'a> {
                                         let tx = ts.horizontal_scaling * ((w0 - tj / 1000.) * ts.font_size);
                                         ts.tm = ts.tm.pre_transform(&Transform2D::create_translation(tx, ty));
                                         dlog!("adjust text by: {} {:?}", i, ts.tm);
+                                    }
+                                    &Object::Real64(i) => {
+                                        geometry::adjust_text(&mut gs.ts, i)?;
                                     }
                                     &Object::Real(i) => {
                                         if output.wants_geometry() {

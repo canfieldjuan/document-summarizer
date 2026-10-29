@@ -119,3 +119,11 @@ Focused regression evidence, format and Clippy completed; Clippy still reports i
 vendor warnings. Phase A is not a PASS. Remaining public coverage, application assembly,
 identity/persistence, original-PDF parity, dependency/writer/C9/SAME60 and platform CI are
 not complete. No push, installation, model/OCR run or held-stack merge occurred.
+
+## r5 follow-up status
+
+Accepted r5 clears the 30 numeric differences and the text-changing decimal
+collision, with legacy output unchanged. Overall Phase A is still NOT DONE:
+the newly frozen transformed-Form probe exposes caller/Form matrix loss in
+Processor::process_stream. See PR-NATIVE-PDF-NUMERIC-PRECISION-AMENDMENT.md for
+the complete result, root cause, remaining stop and offline evidence inventory.
