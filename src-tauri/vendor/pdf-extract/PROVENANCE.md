@@ -33,3 +33,13 @@ waits for public geometry/compatibility proof and frozen-source parity.
 Future dependency updates must explicitly reconcile this delta and these gates.
 
 Reference-derived geometry formulas and descriptors are ported from pinned PDFMiner.six 20260107. NOTICE-PDFMINER retains its installed MIT notice verbatim, SHA256 f01e5d699a33766b5caf4a5099f2856aba4f3f75ea1df05dc0572b34b4bea8f2. AFM source SHA256 cd9b9342117ab5a9217f19eb993b5d32ac4e0d686ca04bb3fc47d1289cbddd47; verbatim Adobe notice SHA256 beee33e00ca4108f85e00aafccf8f6ed298d813d734791ea6e928c1fe2eb4622. Generated reference_metrics.rs retains canonical metrics, Unicode width keys and the reference aliases; legacy core_fonts.rs is unchanged.
+
+## Formatting packaging policy
+
+The local `rustfmt.toml` sets `disable_all_formatting = true` for this retained
+crate only. This packaging delta preserves upstream source/table formatting
+under the application's unchanged `cargo fmt --all -- --check` CI gate. It
+also exempts local edits within this fork; those require source-delta review.
+Application Rust remains checked. `scripts/test_vendor_formatting.py` proves
+both sides using these actual configurations and the same Cargo command.
+This configuration file is local packaging, not an upstream archive file.

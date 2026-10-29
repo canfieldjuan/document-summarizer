@@ -11,3 +11,13 @@ is authoritative. Durable `lopdf-pristine-manifest.json` lists every archive fil
 Local delta implements accepted r5: request-owned opt-in Real64 decimal parsing,
 recursive object/content propagation, explicit numeric access/serialization,
 and regression tests. Existing defaults and From<f64> retain Real(f32).
+
+## Formatting packaging policy
+
+The local `rustfmt.toml` sets `disable_all_formatting = true` for this retained
+crate only. This packaging delta preserves upstream source/table formatting
+under the application's unchanged `cargo fmt --all -- --check` CI gate. It
+also exempts local edits within this fork; those require source-delta review.
+Application Rust remains checked. `scripts/test_vendor_formatting.py` proves
+both sides using these actual configurations and the same Cargo command.
+The remaining rustfmt settings are retained from the upstream archive.
