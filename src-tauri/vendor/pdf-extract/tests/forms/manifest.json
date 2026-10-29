@@ -94,6 +94,66 @@
       "alias": "empty-content",
       "pdf_sha256": "185df574390243d7b7cc02666ea4265ccee1add14b66c1cbce6a8bbf6b881a58",
       "reference_sha256": "d733bd8b1eabf82530ba8f733b175fed378a22c073d16671ed5a2fbe45da8b2b"
+    },
+    {
+      "alias": "bbox-null",
+      "pdf_sha256": "8657ca5a72067dce606fd435f5b7011337a56dfb2103cb0030e2b76692ede3be",
+      "dispatch_regression": true,
+      "reference_sha256": "cc2121a9800f1e656fee24cfe5cac0b2b45a64f59ddb536d395c11e1fb3c5479"
+    },
+    {
+      "alias": "bbox-indirect",
+      "pdf_sha256": "ef3ebfec5b62da920131bd480b3699c6728d043133db31d1ab447a7581df1758",
+      "dispatch_regression": true,
+      "reference_sha256": "c9c999abe7bc5e604f12c23c793849dd315ae10f4aef57985d44ea3b99b6e9f1"
+    },
+    {
+      "alias": "bbox-zero",
+      "pdf_sha256": "b8d9bed82b6acd996a52a6cdadb2580b27982c7608a2a3179960dc87866fc677",
+      "dispatch_regression": true,
+      "reference_sha256": "e88f307f0afc9943104b9cca141937338f85da9a289f0af366bc6eab448a53a8"
+    },
+    {
+      "alias": "subtype-indirect",
+      "pdf_sha256": "53e581b41d2f2ddf9f20327eaba3666b154701f219599dd9137e720453a91204",
+      "dispatch_regression": true,
+      "reference_sha256": "7a19c652bea7013dd1907a051b1d5a6bc7719117963918e1e2cb0d5453b0a80b"
+    },
+    {
+      "alias": "subtype-null",
+      "pdf_sha256": "1f61b77e4bc989cbcb4b7bb01bcf4ecf2a8181597a63678ecc4a9325321924c7",
+      "dispatch_regression": true,
+      "reference_sha256": "f17c53830af1b6d45382962c53c9a30d20cba3a0f2b40b07c90b398b751a6511"
+    },
+    {
+      "alias": "subtype-number",
+      "pdf_sha256": "e99e02429c24c1d7aa410169425681bc4d9aca9aefc873e1b0d24acca573df62",
+      "dispatch_regression": true,
+      "reference_sha256": "212dadaef8b1ca25f713990ab960cb148a405010f2d7be894d20677cf08aa1e0"
+    },
+    {
+      "alias": "subtype-missing",
+      "pdf_sha256": "dc3295699097d2d780a1f5ce715b95e5ca1ac2ec8428d3947d4864094a491989",
+      "dispatch_regression": true,
+      "reference_sha256": "c64cc3484af57d83683058f9853c60542bf7122e2f91b56cab772463d353f5df"
+    },
+    {
+      "alias": "image-with-bbox",
+      "pdf_sha256": "3702471fb1995fb3dcff4d1b984e619a3cf5425c2170c1fbc3211da0c20d6d4c",
+      "dispatch_regression": true,
+      "reference_sha256": "b41a9e9fa4ef4a13ffa1a7f6a6a53a4cb154fdde58c7ce5b817b09be7d8ef308"
+    },
+    {
+      "alias": "unsupported-with-bbox",
+      "pdf_sha256": "215aff9f4d42b20d4c1f75f6db047ad834e9f6369719b62e4de9b4d377163699",
+      "dispatch_regression": true,
+      "reference_sha256": "c211c09d6962aab78bc7bb253ad3a7ac900c1a8f9f1958cd854d1670f0e5fc48"
+    },
+    {
+      "alias": "matrix-null",
+      "pdf_sha256": "11a37c362848f0fdbf8b0ce160146b0375a0fc39d999755ae80594f14fae15c8",
+      "dispatch_regression": true,
+      "reference_sha256": "377b7e5904086e87dd83a88980f668c4a1f9339031580939ed2bf47091027f7a"
     }
   ],
   "errors": [
@@ -112,12 +172,6 @@
     {
       "alias": "matrix-name",
       "pdf_sha256": "a2fb3adb97745eed3b9a6cdd9fd1471111d4dd2a8cb015b67bf3e5591c47bb33",
-      "expected": "geometry error, no panic or successful partial page",
-      "reference_parity": false
-    },
-    {
-      "alias": "matrix-null",
-      "pdf_sha256": "11a37c362848f0fdbf8b0ce160146b0375a0fc39d999755ae80594f14fae15c8",
       "expected": "geometry error, no panic or successful partial page",
       "reference_parity": false
     },
@@ -222,11 +276,66 @@
       "pdf_sha256": "d8f9ebc3ea54e3b00caf91b33c3beed54c4ee48c0c84cef043673192841000f1",
       "expected": "geometry error, no panic or successful partial page",
       "reference_parity": false
+    },
+    {
+      "alias": "bbox-number",
+      "pdf_sha256": "116b2fdaedbc18e736baa0df08085d4dc5b83abffe1b6c4590d82558c9115dfb",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-empty",
+      "pdf_sha256": "2f7cb0d6d825798c9cbb6516b34efce5a1a71677a4aef5e9a3fe3a9dfe2ba6df",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-short",
+      "pdf_sha256": "18b55efb510b7913bcffefa6f99b71aece1dbe1578e8b57939edff33aeec4c66",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-long",
+      "pdf_sha256": "1eaf6321d9a5aba195355ce131520d55852d72c31ae4f566f4e957a4c2619126",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-nonnumeric",
+      "pdf_sha256": "0e4eccf601fda10fd9472e8e156e9529583610a4d8e80a5107c4a8d4564fec8b",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-real-nonfinite",
+      "pdf_sha256": "02a4d75303fff5ae2193872b0ccc720168317dadc3d2464001c2fc1c082fa4bd",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "nonfinite Form Matrix",
+      "reference_parity": false
     }
   ],
   "geometry_comparison": {
     "absolute_tolerance": 1e-09
   },
   "source": "unchanged pinned reference defaults; errors are accepted r6 native policy",
-  "model_calls": 0
+  "model_calls": 0,
+  "corrections": [
+    {
+      "alias": "matrix-null",
+      "reason": "Own native-error misclassification; pinned parser drops direct-null entries. Original PDF unchanged, exact reference output now frozen.",
+      "previous_manifest": "r6-dispatch-before-manifest.json"
+    }
+  ]
 }

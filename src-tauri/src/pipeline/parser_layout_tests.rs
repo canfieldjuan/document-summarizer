@@ -730,6 +730,51 @@ fn decoder_form_invocation_reference() {
 }
 
 #[test]
+fn decoder_form_dispatch_key_semantics() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    let mut failures = Vec::new();
+    for kind in ["fixtures", "errors"] {
+        for case in manifest[kind].as_array().unwrap() {
+            if case["dispatch_regression"] != true {
+                continue;
+            }
+            let alias = case["alias"].as_str().unwrap();
+            let document = pdf_extract::geometry::PreciseDocument::load(
+                root.join(format!("{alias}.pdf")),
+            ).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::geometry::extract_page_geometry(&document, 1)
+            }));
+            match result {
+                Ok(Ok(page)) if kind == "fixtures" => {
+                    let reference: serde_json::Value = serde_json::from_slice(
+                        &fs::read(root.join(format!("{alias}.json"))).unwrap(),
+                    ).unwrap();
+                    let expected: Vec<_> = reference["pages"][0]["chars"].as_array().unwrap()
+                        .iter().map(|c| c["text"].as_str().unwrap()).collect();
+                    let actual: Vec<_> = page.glyphs.iter().map(|g| g.text.as_str()).collect();
+                    if actual != expected {
+                        failures.push(format!("{alias}: expected {expected:?}, got {actual:?}"));
+                    }
+                }
+                Ok(Err(error)) if kind == "errors" => {
+                    let expected = case["expected_error_contains"].as_str().unwrap();
+                    if !error.to_string().contains(expected) {
+                        failures.push(format!("{alias}: wrong error owner: {error}"));
+                    }
+                }
+                Ok(Ok(_)) => failures.push(format!("{alias}: invalid page succeeded")),
+                Ok(Err(error)) => failures.push(format!("{alias}: unexpected error: {error}")),
+                Err(_) => failures.push(format!("{alias}: panicked")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn decoder_form_malformed_invocations_return_errors() {
     check_form_errors(false);
 }

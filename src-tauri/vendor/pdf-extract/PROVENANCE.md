@@ -58,3 +58,8 @@ also exempts local edits within this fork; those require source-delta review.
 Application Rust remains checked. `scripts/test_vendor_formatting.py` proves
 both sides using these actual configurations and the same Cargo command.
 This configuration file is local packaging, not an upstream archive file.
+
+The r6 dispatch review repair consolidates raw dictionary presence and numeric
+array validation at the invocation owner. See the canonical amendment's
+“Review repair: raw Form dictionary semantics” section for the reference binding,
+null-Matrix classification correction and regression evidence.

@@ -1,0 +1,18 @@
+{
+  "alias": "subtype-null",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "1f61b77e4bc989cbcb4b7bb01bcf4ecf2a8181597a63678ecc4a9325321924c7"
+}

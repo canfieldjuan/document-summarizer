@@ -1,0 +1,18 @@
+{
+  "alias": "unsupported-with-bbox",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "215aff9f4d42b20d4c1f75f6db047ad834e9f6369719b62e4de9b4d377163699"
+}

@@ -269,3 +269,77 @@ Evidence aliases under `c9-native-layout-parity-20261027/`:
 `r6-results/parity-score.json`, `r6-mutation-results.json`,
 `r6-gs-dispatch-before.log`, `r6-operator-inventory.json`, and `r6-result.json`.
 The final receipt binds the exact source snapshot, these logs and their hashes.
+
+## Review repair: raw Form dictionary semantics
+
+Oversight B1/B2 on the published candidate traced to our introducing commit
+6c83d00, at `geometry_form_frame`. This is our own porting error: the original
+repair did not consistently preserve the reference's raw dictionary semantics.
+The reference's parser removes direct-null dictionary entries before dispatch;
+its interpreter compares the raw Subtype with the Form literal and unpacks a
+present BBox into four values. The old implementation instead resolved Subtype,
+tested BBox presence without validation and treated null Matrix as malformed.
+Only Resources correctly treated direct null as absent.
+
+### Required repair and contract interpretation
+
+One `invocation_entry` helper now owns missing/direct-null absence for Subtype,
+BBox, Matrix and Resources. A raw direct Form name selects the Form path; other
+subtypes are skipped before content decoding. A present BBox must resolve to four
+finite numbers; Matrix uses the same numeric-array validator with six values.
+BBox is validated, not used to add clipping. Missing/direct-null Matrix selects
+identity. Resources retain their raw direct-empty versus indirect-empty behavior.
+This removes the separate Resources null special case, the dereferencing Subtype
+reader and the presence-only BBox test, rather than adding a downstream filter.
+Legacy dispatch, defaults, dependency versions and application selection stay
+unchanged. No new public API, model call, OCR call or adoption is included.
+
+Item 5's absence rule applies after the reference parser's direct-null removal.
+The original native-error classification of `matrix-null` was our mistake, not
+a declared reference departure. The old manifest remains in durable evidence as
+`r6-dispatch-before-manifest.json`; the PDF bytes remain identical. Its new
+reference JSON was frozen from the pinned `page.extract_text()` before source
+edits. Historical result packets are not overwritten.
+
+### Regression scope
+
+Public fixtures cover every reviewed row, BBox lengths zero/three/four/five,
+non-numeric BBox data, indirect BBox, valid zero BBox, missing/null/numeric/indirect
+Subtype, Image and unsupported subtype with BBox and executable text content,
+and null Matrix. A separate 309-digit Real overflow fixture requires the
+`nonfinite Form Matrix` error so an unrelated failure cannot count.
+The original overflow fixture does contain a decimal point (contrary to that
+detail in the review); its earlier broad error-only assertion still did not
+prove which guard rejected it. The new owner-specific assertion removes that gap.
+In the nonfinite-check mutant, the later glyph validator still rejects the page;
+the regression fails because the required invocation-owner error is missing.
+
+The fail-first `decoder_form_dispatch_key_semantics` lists all wrong outputs
+before the repair, then passes after. Existing fixtures are retained; the only
+old expectation correction is the explicitly recorded null-Matrix classification.
+Tf operand-count and indirect Matrix-element coverage remain non-blocking
+follow-ups in issue #156. The precise implementation stays intact.
+
+All prior merge, production and qualification holds remain. The relayed operator
+priority is to finish this r6 review repair round first, then prepare the 32k
+qualification work order for separate exact-revision acceptance. It authorizes
+no live generation, adoption or held-stack merge.
+
+### Verified repair evidence
+
+The fail-first probe exits 101 before the repair and passes after it. Final
+parser result: 48 passed, 0 failed, 5 held ignored. The continuation reference
+test was also explicitly run. Frozen geometry and exact Page text have zero
+differences across 87 original, 29 Form and 4 continuation page cases. Legacy
+compatibility passes in the parser suite. All 13 deliberate mutants compile
+and are killed at execution (disabled cycle rejection by bounded timeout).
+The original source is restored and hash-checked after mutation. Exact CI
+formatting and Clippy commands pass; inherited vendor warnings remain.
+
+Durable evidence alias `c9-native-layout-parity-20261027/r6-dispatch-result.json`,
+SHA256 `eaa98becf837b5093f0789d237e94cfc06b963201dedee73b261ac5377c17c21`.
+The receipt binds the source/tests, pinned-reference probes, before/after logs,
+fixture integrity, exact-text scorer and mutation results. Final diff touches
+only the invocation owner, its tests/fixtures and canonical documentation.
+Fresh exact-head CI and independent review remain pending; local proof does
+not clear the existing merge, production or qualification holds.

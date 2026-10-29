@@ -1632,6 +1632,32 @@ fn invocation_dictionary<'a>(doc: &'a Document, object: &'a Object) -> Result<&'
     Ok(doc.dereference(object)?.1.as_dict()?)
 }
 
+// PDF null dictionary entries are absent in the pinned reference parser.
+// Keep this raw: resolving a reference first changes Subtype/Resources semantics.
+fn invocation_entry<'a>(dict: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
+    match dict.get(key) {
+        Err(_) | Ok(Object::Null) => None,
+        Ok(object) => Some(object),
+    }
+}
+
+fn invocation_numbers<const N: usize>(doc: &Document, object: &Object, label: &str)
+    -> Result<[f64; N], OutputError> {
+    let values = doc.dereference(object)?.1.as_array()
+        .map_err(|_| invocation_error(&format!("{label} requires {N} numbers")))?;
+    if values.len() != N {
+        return Err(invocation_error(&format!("{label} requires {N} numbers")));
+    }
+    let mut numbers = [0.; N];
+    for (i, value) in values.iter().enumerate() {
+        numbers[i] = doc.dereference(value)?.1.as_float64()?;
+        if !numbers[i].is_finite() {
+            return Err(invocation_error(&format!("nonfinite {label}")));
+        }
+    }
+    Ok(numbers)
+}
+
 fn geometry_form_frame<'a>(doc: &'a Document, resources: &'a Dictionary,
     caller_ctm: Transform, operation: &lopdf::content::Operation) -> Result<Option<InvocationFrame<'a>>, OutputError> {
     if operation.operands.len() != 1 {
@@ -1642,33 +1668,24 @@ fn geometry_form_frame<'a>(doc: &'a Document, resources: &'a Dictionary,
     let (id, object) = doc.dereference(objects.get(name)?)?;
     let xf = object.as_stream()?;
     // Subtype dispatch precedes content decoding: pixels cannot be text operators.
-    let subtype = match xf.dict.get(b"Subtype") {
-        Ok(value) => doc.dereference(value)?.1.as_name()?,
-        Err(_) => return Ok(None),
-    };
-    if subtype != b"Form" || !xf.dict.has(b"BBox") {
+    if !matches!(invocation_entry(&xf.dict, b"Subtype"), Some(Object::Name(name)) if name == b"Form") {
         return Ok(None);
     }
+    let Some(bbox) = invocation_entry(&xf.dict, b"BBox") else { return Ok(None); };
+    invocation_numbers::<4>(doc, bbox, "Form BBox")?;
     let id = id.ok_or_else(|| invocation_error("Form has no resolved stream identity"))?;
-    let matrix = match xf.dict.get(b"Matrix") {
-        Ok(object) => {
-            let values = doc.dereference(object)?.1.as_array()?;
-            if values.len() != 6 { return Err(invocation_error("Form Matrix requires six numbers")); }
-            let mut numbers = [0.; 6];
-            for (i, value) in values.iter().enumerate() {
-                numbers[i] = doc.dereference(value)?.1.as_float64()?;
-                if !numbers[i].is_finite() { return Err(invocation_error("nonfinite Form Matrix")); }
-            }
+    let matrix = match invocation_entry(&xf.dict, b"Matrix") {
+        Some(object) => {
+            let numbers = invocation_numbers::<6>(doc, object, "Form Matrix")?;
             Transform::row_major(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5])
         },
-        Err(_) => Transform::identity(),
+        None => Transform::identity(),
     };
-    // Test raw presence before dereferencing, matching the pinned reference.
     // An indirect empty dictionary owns empty resources; a direct empty one falls back.
-    let resources = match xf.dict.get(b"Resources") {
-        Err(_) | Ok(Object::Null) => resources,
-        Ok(Object::Dictionary(dict)) if dict.is_empty() => resources,
-        Ok(object) => invocation_dictionary(doc, object)?,
+    let resources = match invocation_entry(&xf.dict, b"Resources") {
+        None => resources,
+        Some(Object::Dictionary(dict)) if dict.is_empty() => resources,
+        Some(object) => invocation_dictionary(doc, object)?,
     };
     let content = Content::decode_with_precision(&get_contents(xf), doc.numeric_precision())?;
     Ok(Some(InvocationFrame::new(content, resources, caller_ctm.pre_transform(&matrix), Some(id))))
