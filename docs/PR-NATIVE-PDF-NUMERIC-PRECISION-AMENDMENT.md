@@ -127,3 +127,11 @@ NOT DONE. This is a proposed amendment only. No lopdf source, numeric parsing,
 default precision, or application parser selection has been changed. The current
 r4 candidate is unpublished and unqualified; the fail-first evidence and initial
 partial successes do not clear Phase A or any production/merge hold.
+
+## Acceptance record
+
+The frozen proposal above (SHA256 ba9ca99c9e77e8a9005dbaa476d1d7c31ff450c345d55da0e4538b2aa8aa8175) received oversight CONTRACT PASS in mail `4e456465`. Juan then accepted verbatim: **"accept R3.2 and r5"** (human message `c5fdff5b-12f3-47e0-9abc-049a077052b3`, 2026-10-29T01:31:12.690Z; relay `ce0edfe2`). Only r5 applies to this lane. Its implementation is now authorized; the original proposal text is preserved above.
+
+Binding reader inventory before implementation includes both decimal-token grammars; direct-object, indirect-object, compressed-object, and content-stream entry points; and every pdf-extract numeric accessor. The additional `common_data_structures/mod.rs:75,99` direct-object callers are legacy decoder tests and remain covered. All remaining 30 raw-geometry differences stay visible until individually cleared or explained. No tolerance change, legacy-default change, model call, application adoption, or merge hold is authorized by this acceptance.
+
+This acceptance record contains no implementation. The durable operator receipt is `operator-acceptance-r5.json`.
