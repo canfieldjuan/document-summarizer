@@ -48,3 +48,13 @@ or invalid required invocation data. Legacy callers retain their original path.
 Public fixtures and native error-policy controls live in tests/forms; the latter
 are explicitly marked as contract errors, not reference-parity results.
 The accepted proposal is pinned in PR-NATIVE-PDF-FORM-INVOCATION-AMENDMENT.md.
+
+## Formatting packaging policy
+
+The local `rustfmt.toml` sets `disable_all_formatting = true` for this retained
+crate only. This packaging delta preserves upstream source/table formatting
+under the application's unchanged `cargo fmt --all -- --check` CI gate. It
+also exempts local edits within this fork; those require source-delta review.
+Application Rust remains checked. `scripts/test_vendor_formatting.py` proves
+both sides using these actual configurations and the same Cargo command.
+This configuration file is local packaging, not an upstream archive file.

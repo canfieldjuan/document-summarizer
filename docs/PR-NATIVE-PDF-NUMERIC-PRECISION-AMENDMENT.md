@@ -210,3 +210,29 @@ dependency/writer/C9/SAME60, platform qualification, and independent implementat
 review remain incomplete. No model/OCR calls, installation, push or merge.
 
 Durable evidence alias: `c9-native-layout-parity-20261027/r5-result.json`.
+
+## CI packaging repair (review round)
+
+Root cause: f454b28 introduced the retained pdf-extract path dependency without
+a vendor-local formatting policy. The r5 lopdf import at 8ffa475 extends that
+packaging surface. Our earlier local `cargo fmt --check` did not exercise the
+existing CI `cargo fmt --all -- --check`; the earlier formatting PASS was not
+a CI-equivalent result. The CI failure is ours, not a parser precision failure.
+
+The repair adds vendor-local preservation settings, keeps lopdf's existing
+upstream options, and records the delta in each PROVENANCE.md. No Rust bytes,
+workflow, dependency versions or parser defaults change. Full-fork formatting
+is deliberately exempt; local fork changes still require source-delta review.
+
+Reproduction: the exact CI command and public packaging regression fail before
+the repair. Both pass after. The regression uses the actual configurations in
+a temporary Cargo path-dependency graph, rejects unformatted application Rust,
+and accepts it once formatted. Changing either vendor preservation setting to
+false makes the regression fail. All 148 tracked Rust sources are byte-identical
+to the reviewed r5 head. No downstream compensation was added or needed.
+
+Run `python3 scripts/test_vendor_formatting.py` for the public regression.
+Evidence alias `c9-native-layout-parity-20261027/format-repair-result.json`,
+SHA256 `826ee53505ebce683ce0f894ef9aefed229a1e6a1a61fff15bcd2a50c4ac8fe7`.
+CI owns the broad runtime suites; this packaging-only repair does not rerun model
+or OCR qualification. Independent exact-head review and all holds remain.
