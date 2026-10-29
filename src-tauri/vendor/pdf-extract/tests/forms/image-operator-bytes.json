@@ -1,0 +1,18 @@
+{
+  "alias": "image-operator-bytes",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "5a2f134fdab22a5775b8be17f3bc45822260fedf20415d0e2fb8a46f08fdbbe8"
+}

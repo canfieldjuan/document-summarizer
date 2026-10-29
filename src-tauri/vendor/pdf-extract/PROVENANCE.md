@@ -34,6 +34,21 @@ Future dependency updates must explicitly reconcile this delta and these gates.
 
 Reference-derived geometry formulas and descriptors are ported from pinned PDFMiner.six 20260107. NOTICE-PDFMINER retains its installed MIT notice verbatim, SHA256 f01e5d699a33766b5caf4a5099f2856aba4f3f75ea1df05dc0572b34b4bea8f2. AFM source SHA256 cd9b9342117ab5a9217f19eb993b5d32ac4e0d686ca04bb3fc47d1289cbddd47; verbatim Adobe notice SHA256 beee33e00ca4108f85e00aafccf8f6ed298d813d734791ea6e928c1fe2eb4622. Generated reference_metrics.rs retains canonical metrics, Unicode width keys and the reference aliases; legacy core_fonts.rs is unchanged.
 
+
+## Opt-in Form invocation repair (r6)
+
+The geometry path ports Form CTM composition, child state and raw Resources
+selection from the same pinned PDFMiner `pdfinterp.py` do_Do/init_state owner.
+Image bytes and unsupported subtypes are not interpreted as text operators.
+An explicit invocation stack replaces geometry recursion; active canonical
+stream identities reject cycles, while repeated sequential Forms are preserved.
+Unlike the reference's cycle skip/permissive malformed handling, the accepted
+contract requires geometry errors without a successful partial page for cyclic
+or invalid required invocation data. Legacy callers retain their original path.
+Public fixtures and native error-policy controls live in tests/forms; the latter
+are explicitly marked as contract errors, not reference-parity results.
+The accepted proposal is pinned in PR-NATIVE-PDF-FORM-INVOCATION-AMENDMENT.md.
+
 ## Formatting packaging policy
 
 The local `rustfmt.toml` sets `disable_all_formatting = true` for this retained
@@ -43,3 +58,8 @@ also exempts local edits within this fork; those require source-delta review.
 Application Rust remains checked. `scripts/test_vendor_formatting.py` proves
 both sides using these actual configurations and the same Cargo command.
 This configuration file is local packaging, not an upstream archive file.
+
+The r6 dispatch review repair consolidates raw dictionary presence and numeric
+array validation at the invocation owner. See the canonical amendment's
+“Review repair: raw Form dictionary semantics” section for the reference binding,
+null-Matrix classification correction and regression evidence.
