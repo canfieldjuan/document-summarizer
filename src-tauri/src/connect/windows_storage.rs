@@ -268,11 +268,34 @@ pub(crate) fn read_bounded_regular_file(
     allow_empty: bool,
     private_root: Option<&Path>,
 ) -> io::Result<Vec<u8>> {
+    read_bounded_file(path, maximum, allow_empty, private_root, true)
+}
+
+pub(crate) fn read_bounded_inherited_private_file(
+    path: &Path,
+    maximum: u64,
+    private_root: &Path,
+) -> io::Result<Vec<u8>> {
+    read_bounded_file(path, maximum, false, Some(private_root), false)
+}
+
+fn read_bounded_file(
+    path: &Path,
+    maximum: u64,
+    allow_empty: bool,
+    private_root: Option<&Path>,
+    require_protected: bool,
+) -> io::Result<Vec<u8>> {
     if let Some(root) = private_root {
-        validate_private_regular_file(path, root)?;
+        validate_regular_file(path, root, require_protected)?;
     }
     let mut file = open_existing(path, false, GENERIC_READ | READ_CONTROL)?;
-    validate_opened_handle(&file, false, private_root.is_some(), private_root.is_some())?;
+    validate_opened_handle(
+        &file,
+        false,
+        private_root.is_some(),
+        private_root.is_some() && require_protected,
+    )?;
     let length = file.metadata()?.len();
     if length > maximum || (!allow_empty && length == 0) {
         return Err(io::Error::new(
