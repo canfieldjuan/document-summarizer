@@ -4,6 +4,10 @@ use crate::pipeline::contracts::{
 };
 use crate::pipeline::control::{ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::model::response_format;
+use crate::pipeline::native_request::{
+    self, failure, CompletionResponse, FramingPolicy, PromptFraming, TokenizeRequest,
+    TokenizeResponse, MAX_RESPONSE_BYTES, MAX_TOKENIZE_RESPONSE_BYTES,
+};
 use crate::pipeline::qwen_tokenizer::{request_fits_context, TOKENIZER_FRAMING_RESERVE_TOKENS};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
@@ -27,8 +31,6 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
 const INFERENCE_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_MODEL_RECORDS: usize = 8;
 #[cfg(unix)]
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
@@ -45,6 +47,7 @@ pub struct GgufRuntimeConfig {
     pub expected_server_digest: String,
     pub expected_runtime_libraries: &'static [QualifiedRuntimeFile],
     pub context_tokens: u32,
+    pub(crate) framing_policy: FramingPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,12 +109,6 @@ impl ModelIdentityGuard {
     fn release_lease(&self) {
         release_model_read_lease(&self.file);
     }
-}
-
-struct PromptFraming {
-    system_open: Vec<u32>,
-    system_close_user_open: Vec<u32>,
-    user_close_assistant_open: Vec<u32>,
 }
 
 struct ServerOwner {
@@ -388,7 +385,12 @@ impl LlamaCppRuntime {
             let _ = child.wait();
             return Err(error);
         }
-        let prompt_framing = match PromptFraming::load(&client, &base_url, &api_token) {
+        let prompt_framing = match load_prompt_framing(
+            &client,
+            &base_url,
+            &api_token,
+            config.framing_policy.clone(),
+        ) {
             Ok(prompt_framing) => prompt_framing,
             Err(error) => {
                 let _ = child.kill();
@@ -438,11 +440,7 @@ impl LlamaCppRuntime {
             api_token,
             model_id: "fixture-model".to_string(),
             context_tokens: 8_192,
-            prompt_framing: PromptFraming {
-                system_open: Vec::new(),
-                system_close_user_open: Vec::new(),
-                user_close_assistant_open: Vec::new(),
-            },
+            prompt_framing: PromptFraming::empty_fixture(),
             inference_slot: Mutex::new(()),
             model_identity_guard: None,
             cache_key: String::new(),
@@ -540,37 +538,7 @@ impl LlamaCppRuntime {
             false,
             HEALTH_TIMEOUT,
         )?;
-        let capacity = self
-            .prompt_framing
-            .system_open
-            .len()
-            .checked_add(system.len())
-            .and_then(|value| value.checked_add(self.prompt_framing.system_close_user_open.len()))
-            .and_then(|value| value.checked_add(user.len()))
-            .and_then(|value| {
-                value.checked_add(self.prompt_framing.user_close_assistant_open.len())
-            })
-            .ok_or_else(|| {
-                failure(
-                    "MODEL_CONTEXT_EXCEEDED",
-                    "GGUF prompt token count exceeds the supported range",
-                    false,
-                )
-            })?;
-        u32::try_from(capacity).map_err(|_| {
-            failure(
-                "MODEL_CONTEXT_EXCEEDED",
-                "GGUF prompt token count exceeds the supported range",
-                false,
-            )
-        })?;
-        let mut tokens = Vec::with_capacity(capacity);
-        tokens.extend_from_slice(&self.prompt_framing.system_open);
-        tokens.extend(system);
-        tokens.extend_from_slice(&self.prompt_framing.system_close_user_open);
-        tokens.extend(user);
-        tokens.extend_from_slice(&self.prompt_framing.user_close_assistant_open);
-        Ok(tokens)
+        self.prompt_framing.compose(system, user)
     }
 
     fn completion(
@@ -583,15 +551,11 @@ impl LlamaCppRuntime {
         let response = self
             .authorize(self.client.post(self.endpoint("/completion")))
             .timeout(timeout)
-            .json(&CompletionRequest {
-                prompt,
-                n_predict: request.max_output_tokens,
-                temperature: 0.0,
-                seed: request.seed,
-                stop: ["<|im_end|>"],
-                cache_prompt: true,
-                json_schema: schema,
-            })
+            .json(
+                &self
+                    .prompt_framing
+                    .completion_request(request, prompt, schema),
+            )
             .send()
             .map_err(|_| failure("MODEL_RUNTIME_UNAVAILABLE", "GGUF generation failed", true))?;
         decode_bounded(response, MAX_RESPONSE_BYTES)
@@ -760,60 +724,11 @@ impl ModelRuntime for LlamaCppRuntime {
             }
             check_cancellation(control)?;
             let completed = self.completion(request, &prompt, schema, REQUEST_TIMEOUT)?;
-            observed_usage.prompt_tokens = completed.tokens_evaluated;
-            observed_usage.completion_tokens = completed.tokens_predicted;
-            observed_usage.total_tokens = completed
-                .tokens_evaluated
-                .zip(completed.tokens_predicted)
-                .map(|(prompt, completion)| prompt.saturating_add(completion));
-            if completed.truncated {
-                return Err(failure(
-                    "MODEL_EXECUTION_UNVERIFIED",
-                    "Direct GGUF response exceeded the qualified context",
-                    true,
-                ));
-            }
-            if matches!(completed.stop_type, CompletionStopType::Limit) {
-                return Err(failure(
-                    "MODEL_OUTPUT_LIMIT_REACHED",
-                    "Direct GGUF generation exhausted its output allowance before completion",
-                    true,
-                ));
-            }
-            if !matches!(
-                completed.stop_type,
-                CompletionStopType::Eos | CompletionStopType::Word
-            ) {
-                return Err(failure(
-                    "MODEL_EXECUTION_UNVERIFIED",
-                    "Direct GGUF generation stopped before a qualified completion boundary",
-                    true,
-                ));
-            }
-            let reported_prompt_tokens = completed.tokens_evaluated.ok_or_else(|| {
-                failure(
-                    "MODEL_RESPONSE_INVALID",
-                    "Direct GGUF response omitted prompt-token accounting",
-                    true,
-                )
-            })?;
-            let completion_tokens = completed.tokens_predicted.ok_or_else(|| {
-                failure(
-                    "MODEL_RESPONSE_INVALID",
-                    "Direct GGUF response omitted completion-token accounting",
-                    true,
-                )
-            })?;
-            if reported_prompt_tokens != u64::from(prompt_tokens)
-                || completion_tokens > u64::from(request.max_output_tokens)
-            {
-                return Err(failure(
-                    "MODEL_EXECUTION_UNVERIFIED",
-                    "Direct GGUF token accounting did not match the admitted request",
-                    true,
-                ));
-            }
-            let text = completed.content.trim().to_string();
+            observed_usage = completed.usage();
+            let text = completed
+                .validated_content(prompt_tokens, request.max_output_tokens)?
+                .trim()
+                .to_string();
             if text.is_empty() {
                 return Err(failure(
                     "MODEL_RESPONSE_EMPTY",
@@ -1446,48 +1361,22 @@ fn create_private_api_key_file(
     Ok(file)
 }
 
-impl PromptFraming {
-    fn load(client: &Client, base_url: &str, token: &str) -> Result<Self, ModelRuntimeFailure> {
-        let system_open = tokenize_text(
+fn load_prompt_framing(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    policy: FramingPolicy,
+) -> Result<PromptFraming, ModelRuntimeFailure> {
+    PromptFraming::load(policy, |content, parse_special| {
+        tokenize_text(
             client,
             base_url,
             token,
-            "<|im_start|>system\n",
-            true,
+            content,
+            parse_special,
             HEALTH_TIMEOUT,
-        )?;
-        let system_close_user_open = tokenize_text(
-            client,
-            base_url,
-            token,
-            "<|im_end|>\n<|im_start|>user\n",
-            true,
-            HEALTH_TIMEOUT,
-        )?;
-        let user_close_assistant_open = tokenize_text(
-            client,
-            base_url,
-            token,
-            "<|im_end|>\n<|im_start|>assistant\n",
-            true,
-            HEALTH_TIMEOUT,
-        )?;
-        if system_open.is_empty()
-            || system_close_user_open.is_empty()
-            || user_close_assistant_open.is_empty()
-        {
-            return Err(failure(
-                "MODEL_EXECUTION_UNVERIFIED",
-                "Qualified Qwen prompt framing could not be tokenized",
-                false,
-            ));
-        }
-        Ok(Self {
-            system_open,
-            system_close_user_open,
-            user_close_assistant_open,
-        })
-    }
+        )
+    })
 }
 
 fn tokenize_text(
@@ -1502,12 +1391,7 @@ fn tokenize_text(
         .post(format!("{base_url}/tokenize"))
         .bearer_auth(token)
         .timeout(timeout)
-        .json(&TokenizeRequest {
-            content,
-            add_special: false,
-            parse_special,
-            with_pieces: false,
-        })
+        .json(&TokenizeRequest::new(content, parse_special))
         .send()
         .map_err(|_| {
             failure(
@@ -1568,6 +1452,7 @@ fn runtime_cache_key(config: &GgufRuntimeConfig) -> Result<String, ModelRuntimeF
         hasher.update([0]);
         hasher.update(library.digest.as_bytes());
     }
+    config.framing_policy.update_cache_key(&mut hasher);
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -2002,31 +1887,7 @@ fn decode_bounded<T: for<'de> Deserialize<'de>>(
             true,
         ));
     }
-    let mut bytes = Vec::new();
-    response
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            failure(
-                "MODEL_RESPONSE_INVALID",
-                "GGUF response could not be read",
-                true,
-            )
-        })?;
-    if bytes.len() as u64 > limit {
-        return Err(failure(
-            "MODEL_RESPONSE_TOO_LARGE",
-            "GGUF response exceeded its byte limit",
-            true,
-        ));
-    }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        failure(
-            "MODEL_RESPONSE_INVALID",
-            "GGUF response was malformed",
-            true,
-        )
-    })
+    native_request::decode_bounded_json(response, limit)
 }
 
 fn diagnostic(
@@ -2047,59 +1908,6 @@ fn diagnostic(
     }
 }
 
-fn failure(code: &str, message: impl Into<String>, recoverable: bool) -> ModelRuntimeFailure {
-    ModelRuntimeFailure {
-        code: code.to_string(),
-        message: message.into(),
-        recoverable,
-        request_attempts: Vec::new(),
-    }
-}
-
-#[derive(Serialize)]
-struct TokenizeRequest<'a> {
-    content: &'a str,
-    add_special: bool,
-    parse_special: bool,
-    with_pieces: bool,
-}
-
-#[derive(Deserialize)]
-struct TokenizeResponse {
-    tokens: Vec<u32>,
-}
-
-#[derive(Serialize)]
-struct CompletionRequest<'a> {
-    prompt: &'a [u32],
-    n_predict: u32,
-    temperature: f32,
-    seed: u64,
-    stop: [&'a str; 1],
-    cache_prompt: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    json_schema: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-struct CompletionResponse {
-    content: String,
-    tokens_predicted: Option<u64>,
-    tokens_evaluated: Option<u64>,
-    #[serde(default)]
-    truncated: bool,
-    stop_type: CompletionStopType,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CompletionStopType {
-    Eos,
-    Word,
-    Limit,
-    None,
-}
-
 #[derive(Deserialize)]
 struct ModelsResponse {
     data: Vec<ModelRecord>,
@@ -2116,6 +1924,10 @@ struct ModelMeta {
     n_ctx: u32,
     n_ctx_train: u32,
 }
+
+#[cfg(test)]
+#[path = "llama_cpp_framing_tests.rs"]
+mod framing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2211,7 +2023,7 @@ mod tests {
         }
     }
 
-    fn generation_result_for_completion(
+    pub(super) fn generation_result_for_completion(
         response_body: &str,
     ) -> Result<ModelResponse, ModelRuntimeFailure> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2965,6 +2777,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: LIBRARIES,
             context_tokens: 8_192,
+            framing_policy: FramingPolicy::Legacy,
         };
         let exact = runtime_cache_key(&config).unwrap();
         assert_eq!(runtime_cache_key(&config).unwrap(), exact);
@@ -3117,6 +2930,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            framing_policy: FramingPolicy::Legacy,
         };
         let mut runtime =
             LlamaCppRuntime::for_test("http://127.0.0.1:1".to_string(), "secret".to_string());
@@ -3154,6 +2968,7 @@ mod tests {
             expected_server_digest: "b".repeat(64),
             expected_runtime_libraries: &[],
             context_tokens: 8_192,
+            framing_policy: FramingPolicy::Legacy,
         };
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();

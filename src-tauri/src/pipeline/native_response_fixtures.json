@@ -1,0 +1,558 @@
+{
+  "cache_key": "5cf933b09ecc71964036460e39f1e90a17d836702baa4a3994224f9cda21dbd9",
+  "responses": [
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": true,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "model_id": "fixture-model",
+        "runtime_id": "llama.cpp-qwen-gguf",
+        "text": "ok"
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": true,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"  ok\\n\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "model_id": "fixture-model",
+        "runtime_id": "llama.cpp-qwen-gguf",
+        "text": "ok"
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_EMPTY",
+        "message": "Local model returned no text",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\" \\t\\n\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_EMPTY",
+        "message": "Local model returned no text",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":false,\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 0,
+            "prompt_tokens": 2,
+            "total_tokens": 2
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": true,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":0,\"truncated\":false}",
+      "result": {
+        "model_id": "fixture-model",
+        "runtime_id": "llama.cpp-qwen-gguf",
+        "text": "ok"
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 2,
+            "prompt_tokens": 2,
+            "total_tokens": 4
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":2,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF token accounting did not match the admitted request",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": 2,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":null,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "Direct GGUF response omitted completion-token accounting",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 0,
+            "total_tokens": 1
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":0,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF token accounting did not match the admitted request",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 1,
+            "total_tokens": 2
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":1,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF token accounting did not match the admitted request",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 3,
+            "total_tokens": 4
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":3,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF token accounting did not match the admitted request",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":null,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "Direct GGUF response omitted prompt-token accounting",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": true,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"eos\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "model_id": "fixture-model",
+        "runtime_id": "llama.cpp-qwen-gguf",
+        "text": "ok"
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"limit\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_OUTPUT_LIMIT_REACHED",
+        "message": "Direct GGUF generation exhausted its output allowance before completion",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"none\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF generation stopped before a qualified completion boundary",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"future\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":null,\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": 2,
+            "total_tokens": 3
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":true}",
+      "result": {
+        "code": "MODEL_EXECUTION_UNVERIFIED",
+        "message": "Direct GGUF response exceeded the qualified context",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":\"true\"}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"stop_type\":\"word\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": 2,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_evaluated\":2,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "Direct GGUF response omitted completion-token accounting",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": 1,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"stop_type\":\"word\",\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "Direct GGUF response omitted prompt-token accounting",
+        "recoverable": true
+      }
+    },
+    {
+      "attempts": [
+        {
+          "attempt_ordinal": 0,
+          "configured_output_tokens": 1,
+          "elapsed_milliseconds": 0,
+          "provider_usage": {
+            "completion_tokens": null,
+            "prompt_tokens": null,
+            "total_tokens": null
+          },
+          "request_ordinal": 0,
+          "stage": "Analyze",
+          "succeeded": false,
+          "transport_attempt": "primary"
+        }
+      ],
+      "input": "{\"content\":\"ok\",\"tokens_evaluated\":2,\"tokens_predicted\":1,\"truncated\":false}",
+      "result": {
+        "code": "MODEL_RESPONSE_INVALID",
+        "message": "GGUF response was malformed",
+        "recoverable": true
+      }
+    }
+  ],
+  "source_revision": "7911f4375772fbc2e6c063a4e4a82aea7d638751"
+}
