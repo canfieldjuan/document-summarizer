@@ -1,0 +1,29 @@
+{
+  "result": "STOP: source decimals collapse before glyph geometry; exact reference text differs",
+  "cases": [
+    {
+      "alias": "at-boundary",
+      "pdf_sha256": "2110304da7aa590e1f66ba3eb72289ba3f80da29572cda3b385ce108dd85f9d5",
+      "decimal": "717.00000",
+      "as_f32": 717.0,
+      "reference_text": "A B",
+      "reference_tops": [
+        62.48400000000004,
+        65.48400000000004
+      ]
+    },
+    {
+      "alias": "over-boundary",
+      "pdf_sha256": "e1e26e4888f2df68c79cab10e975f20e95e0448e4cd78d50600b3ccc076c15fe",
+      "decimal": "716.99999",
+      "as_f32": 717.0,
+      "reference_text": "A\nB",
+      "reference_tops": [
+        62.48400000000004,
+        65.48401000000001
+      ]
+    }
+  ],
+  "native_comparison": "pending Rust probe",
+  "tolerance_changed": false
+}

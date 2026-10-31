@@ -1,0 +1,10 @@
+format_strings = false
+reorder_imports = true
+fn_params_layout = "Compressed"
+max_width = 120
+comment_width = 120
+wrap_comments = true
+
+# Local packaging policy: preserve retained upstream source formatting.
+# Application formatting is still enforced by cargo fmt --all -- --check.
+disable_all_formatting = true

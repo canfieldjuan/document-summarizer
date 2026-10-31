@@ -1,0 +1,24 @@
+{
+  "fixtures": [
+    {
+      "alias": "transformed-content",
+      "pdf_sha256": "cfdec181aa9e2c34de0162b7c1c334664170ffa85480a6586f2bebe97d36bbf0",
+      "reference_sha256": "dd541202167e875d41c10ca900ee286e3072f04f47c011c8beb3290a487a9a8b"
+    },
+    {
+      "alias": "transformed-form",
+      "pdf_sha256": "6f64f4a0130a8c5bacbae937916a07b2f7165895b16971cea6229a2ae68c2f42",
+      "reference_sha256": "67d4505d389f23ed6a9393f77ab4686d518884ff77011d509a8eb2ddb75b8635"
+    },
+    {
+      "alias": "page-continuation",
+      "pdf_sha256": "8d1a8c1c4d928e12b83b9b2d4545194d5c6095f045fa3860334165adef85cb6b",
+      "reference_sha256": "de5a57d8e6144ef63f9c36226eab6513e077ce85bca96491055398f185682d21"
+    }
+  ],
+  "geometry_comparison": {
+    "absolute_tolerance": 1e-09
+  },
+  "source": "unchanged pinned reference defaults",
+  "model_calls": 0
+}

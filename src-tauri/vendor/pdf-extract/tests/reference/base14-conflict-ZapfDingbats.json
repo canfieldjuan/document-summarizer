@@ -1,0 +1,67 @@
+{
+  "alias": "base14-conflict-ZapfDingbats",
+  "pdf_sha256": "f23d6c5ade889f2ef7e85c7c0e055274e37775f10dfc86bf60b6749d96b2c582",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "ZapfDingbats",
+          "adv": 8.268,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 80.268,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 8.268,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            80.268,
+            720.0
+          ],
+          "fontname": "ZapfDingbats",
+          "adv": 9.432,
+          "upright": true,
+          "x0": 80.268,
+          "y0": 720.0,
+          "x1": 89.7,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 9.432000000000002,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

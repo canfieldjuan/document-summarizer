@@ -1,0 +1,67 @@
+{
+  "alias": "base14-conflict-Symbol",
+  "pdf_sha256": "063073b7d07827d1cd0e1bb620583fbb419ade347e462a2821e7eefddf1f9653",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Symbol",
+          "adv": 0.0,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 72.0,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 0.0,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Symbol",
+          "adv": 0.0,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 72.0,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 0.0,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

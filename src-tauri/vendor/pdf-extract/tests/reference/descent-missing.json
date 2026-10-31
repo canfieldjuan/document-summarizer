@@ -1,0 +1,67 @@
+{
+  "alias": "descent-missing",
+  "pdf_sha256": "2c2d724afec8eebbcc156718f35db6e506504dff537b6a0ad1ca08ac1098ac2e",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "PublicGeometry",
+          "adv": 6.0,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 78.0,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 6.0,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            78.0,
+            720.0
+          ],
+          "fontname": "PublicGeometry",
+          "adv": 8.4,
+          "upright": true,
+          "x0": 78.0,
+          "y0": 720.0,
+          "x1": 86.4,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 8.400000000000006,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}
