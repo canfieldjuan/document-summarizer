@@ -1,9 +1,10 @@
 # Read PDFs that open with an empty password
 
 PROPOSED CONTRACT for [issue #133](https://github.com/canfieldjuan/document-summarizer/issues/133).
-This revision requests review of the behavior and implementation surface below.
-Implementation follows independent oversight review and Juan's acceptance of the
-exact contract revision. The contract commit contains documentation only.
+Juan accepted the native behavior at `f1bbcfa`. This revision proposes the
+[encrypted reader amendment](#encrypted-reader-amendment) required by the
+native reproduction. The dependency change requires independent oversight
+review and Juan's acceptance of the exact amended revision.
 
 ## Root cause
 
@@ -169,19 +170,19 @@ derived child or usable parsed artifact. No fallthrough to a partial summary.
   owner delegation, error-code changes, test results, mutations and producer
   compatibility disposition. They include every difference from this inventory.
 
-The expected implementation is confined to native admission and its direct OCR
-reader. Larger library changes, another extractor, or a new serialized field
-require an explicit amendment rather than an incidental patch.
+The encrypted reader amendment proposes a narrow `lopdf` backport
+and its source pin in `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`.
+The app change surface remains native admission and its direct OCR reader.
 
 ## Explicit non-scope
 
 Runtime/client/attach/settings/deprecation work remains connect-runtime's.
 No model, prompt, context/output limit, shared-host canary, writer guard,
 benchmark label, frozen expected fact or source-completeness rule changes.
-Dependencies, PDF geometry defaults, the tagged-output wire format, database
-schema and correction format are outside this repair. Password entry, storage,
-credential guessing, external decryptors and user-facing decryption tools are
-outside it. Existing summary/parser qualification and merge holds remain gates.
+The dependency change is confined to the `lopdf` source backport. Keep
+existing PDF geometry defaults, tagged-output wire format, database schema
+and correction format. Password entry, storage, credential guessing, external
+decryptors and user-facing decryption tools are outside this repair. Existing summary/parser qualification and merge holds remain gates.
 
 ## Assumptions and blockers
 
@@ -195,13 +196,59 @@ Native public-fixture proof can proceed after acceptance while that receipt is
 pending. Issue #133 remains open until both the native and OCR requirements have
 evidence and the authorized frozen-input inventory has been remeasured.
 
-The pinned encrypted reader discards individual object-decryption errors at
-`reader.rs:871-873`. This source observation does not establish a reproduced
-corrupt-input admission. The fail-first investigation must test the relevant
-corrupt-content fixture and identify the earliest observable failure. If a
-required failure signal is lost inside the library, stop that dependent change
-and amend the contract for an origin repair before admitting the affected
-class. A downstream text heuristic cannot substitute for that missing signal.
+### Encrypted reader amendment
+
+The native fail-first on `f1bbcfa` loaded a synthetic empty-password RC4 PDF
+with `was_encrypted=true`, `is_encrypted=false` and no remaining `/Encrypt`.
+The clear twin parsed. The encrypted twin failed at the app's blanket rule
+with `ENCRYPTED_PDF_UNSUPPORTED`.
+
+The AES control isolated the dependency failure. Replacing one page stream's
+ciphertext with one byte returned `DecryptionError::InvalidCipherTextLength`
+at the object decryptor. The encrypted reader discarded the error, inserted
+the stream and cleared `/Encrypt` at `reader.rs:871-873,904-909`. Both default
+and strict memory loads returned success. The intact twin's second page
+contained text. The corrupt PDF returned that page as blank and preserved
+the first page's text. A genuine unread page can have the same downstream
+state. Refuse the observable decryption failure before page extraction so
+those genuine pages can continue through the existing OCR eligibility rule.
+[Upstream v0.47.0 still retains the failed object after logging](https://github.com/J-F-Liu/lopdf/blob/v0.47.0/src/reader.rs#L934-L940).
+
+- Base the backport on the published `lopdf 0.42.0` archive. Its SHA-256 is
+  `25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c`.
+  Use a single Cargo source override pinned to the reviewed source revision
+  for Doc Sum and `pdf-extract 0.12.0`. Record the source diff and lockfile
+  resolution for both callers.
+- Provide an opt-in in-memory load for original PDFs that propagates encrypted
+  object-load failures at the encrypted reader. Return the existing typed
+  `Error::Decryption` on the demonstrated decrypt failure before inserting a
+  partial object or marking the document decrypted. Trace object and
+  compressed-object materialization through the same encrypted path so an
+  observed failure to decode required content is returned before completion.
+  Keep the existing default loader for other readers, including tagged output.
+- Have the native opener use that result and map the AES failure to
+  `MALFORMED_PDF` before parsing or persisting pages. Use the typed trailer
+  entry, authentication and handler results for the other failure classes
+  already defined above. Admit empty-password originals after the checked
+  in-memory load. Keep the exact original-byte identity for custody and OCR.
+
+For implementation verification, replay the retained intact and corrupt
+AES fixtures through the checked loader and the real app parser. The same
+corrupt bytes must return the typed error at the reader and
+`MALFORMED_PDF` with no parsed artifact at the app boundary. Restore only the
+error discard as a mutation and require the negative to fail. Verify readable
+RC4 and AES twins, genuine unread pages, locked and malformed controls, and
+the original-byte and normalization checks below. Use the existing
+tagged-output and ordinary-PDF cases to verify the shared dependency pin.
+
+Native proof aliases are `native-fail-first` (SHA-256
+`c5f1561dcc608515d7cd22479bc1fdeb706b8aad249b9df44e4cd809b91460a9`)
+and `aes-origin-probe` (SHA-256
+`4aeee0786033b3204d6df2777cc9d5580dff868351168d2a6a2ad54a46145d25`).
+The retained AES corrupt fixture has SHA-256
+`4bc43735bc7ef7d8b40e2aaf9bf3256692069c8038a103396054ca0f60246631`.
+
+### Private input authorization
 
 Private input remeasurement needs a separately bound, parse-only approval for
 the two previously blocked aliases and their original hashes. Unseen claims,
@@ -222,8 +269,8 @@ Published references use synthetic aliases, counts, source pins and SHA-256.
    result. A different failure is investigated before the repair.
 2. Isolate and explain. Show loader success, its decrypted/remaining-encryption
    state, and the first native-admission divergence. Record malformed and locked
-   controls separately, including partial-load behavior. This draft has source
-   evidence only; the runtime reproduction remains to be executed after acceptance.
+   controls separately, including partial-load behavior. The native and AES
+   evidence above now records the reproduced behavior.
 3. Fix at the named opening owner and route both original-source readers through
    it. The original reproduction must pass afterward. Commit the regression.
 4. Cover unencrypted and empty-password-encrypted text twins under supported RC4
@@ -231,10 +278,11 @@ Published references use synthetic aliases, counts, source pins and SHA-256.
    page warnings, normalization and citation page spans, not a matching substring.
    Include one-page, multi-page, Unicode-capable existing fixtures, and restricted
    permission flags. Keep the new policy independent of filename and metadata.
-5. Cover nonempty-required credentials, malformed `/Encrypt` type/reference,
-   missing/wrong-typed required encryption fields, unsupported handler/version,
-   and corrupt encrypted content. Check the distinct failure class, persisted
-   failed state and absent parsed artifact/handoff/child. An explicitly empty
+5. Cover nonempty-required credentials, a direct `/Encrypt` dictionary,
+   dangling reference and non-dictionary target, missing or wrong-typed required
+   encryption fields, unsupported handler/version, and corrupt encrypted
+   content. Check the distinct failure class, persisted failed state and absent
+   parsed artifact/handoff/child. An explicitly empty
    credential is the positive case, not a falsy value replaced by another secret.
 6. Cover encrypted image-only and mixed twins with unread pages first/middle/last.
    Check the existing visual markers and OCR eligibility. Through the real store
@@ -270,10 +318,14 @@ origin fix, passing original/isolated cases and the committed regression.
 
 ## Implementation summary
 
-Current change is this contract document only. Application behavior, tests and
-dependencies have not been edited. Runtime reproduction, fixtures, the origin
-fix, producer compatibility and qualification results are future deliverables
-under their accepted scopes.
+The native opener now checks a remaining `/Encrypt` entry as a reference to
+a dictionary before enumerating pages. The baseline persisted an empty parsed
+artifact for a direct dictionary. The regression exercises that case, a
+dangling reference and a non-dictionary target through the real lifecycle and
+requires nonrecoverable `MALFORMED_PDF` with no parsed artifact. The reader
+backport and full empty-password admission are pending. The baseline control
+receipt `encryption-controls` has SHA-256
+`482bec6ea09c46a38e1c59a365a6ce30297ea186d58356e982db6b11e602d972`.
 
 ## Cold diff audit
 
@@ -285,8 +337,8 @@ original-byte custody, and every named pending gate. Check Markdown links and
 
 ## Gap audit
 
-NOT DONE for implementation acceptance and issue closure. Pending are independent
-contract review, Juan's exact-revision acceptance, any shared-file reservation,
-fail-before/pass-after parser and OCR-consumer proof, producer compatibility,
-the separately approved private inventory remeasurement, and normal review/CI.
+NOT DONE for full empty-password admission and issue closure. Pending are
+review and acceptance of this amendment, the reader backport and full native
+proof, OCR-consumer proof and producer compatibility, the separately approved
+private inventory remeasurement, and normal review and CI.
 The held shared-runtime G0/G1/G2 sequence remains separate from this work.
