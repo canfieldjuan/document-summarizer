@@ -78,14 +78,7 @@ impl PdfExtractParser {
 
         let source_bytes = verified_source_bytes(document)?;
 
-        let pdf = PdfDocument::load_mem(&source_bytes).map_err(map_load_error)?;
-        if pdf.was_encrypted() || pdf.is_encrypted() {
-            return Err(parse_failure(
-                "ENCRYPTED_PDF_UNSUPPORTED",
-                "Encrypted PDFs are not supported in the native-text parser",
-                false,
-            ));
-        }
+        let pdf = open_native_pdf(&source_bytes)?;
 
         let source_page_numbers = pdf.get_pages().keys().copied().collect::<Vec<_>>();
         let mut parsed_pages = Vec::new();
@@ -149,6 +142,24 @@ impl PdfExtractParser {
             warnings: document_warnings,
         })
     }
+}
+
+fn open_native_pdf(source: &[u8]) -> Result<PdfDocument, PipelineFailure> {
+    let pdf = PdfDocument::load_mem(source).map_err(map_load_error)?;
+    let has_encrypt_entry = pdf.trailer.has(b"Encrypt");
+    if has_encrypt_entry {
+        // A partial load can retain a malformed encryption entry. Validate it
+        // before enumerating pages.
+        pdf.get_encrypted().map_err(map_load_error)?;
+    }
+    if has_encrypt_entry || pdf.was_encrypted() {
+        return Err(parse_failure(
+            "ENCRYPTED_PDF_UNSUPPORTED",
+            "Encrypted PDFs are not supported in the native-text parser",
+            false,
+        ));
+    }
+    Ok(pdf)
 }
 
 fn verified_source_bytes(document: &IngestedDocument) -> Result<Vec<u8>, PipelineFailure> {
@@ -2032,6 +2043,47 @@ mod tests {
             .expect("events should load")
             .iter()
             .any(|event| event.next_state == PipelineState::Parsed));
+    }
+
+    #[test]
+    fn invalid_encrypt_reference_never_persists_a_parsed_artifact() {
+        let mut document = build_pdf(vec![FixturePage::Text(b"PAGE".to_vec())]);
+        let wrong_type = document.add_object(Object::Integer(17));
+        let missing = (document.max_id + 16, 0);
+        let invalid_entries = [
+            (
+                "direct dictionary",
+                Object::Dictionary(dictionary! { "Filter" => "Standard" }),
+            ),
+            ("missing object", Object::Reference(missing)),
+            ("wrong object type", Object::Reference(wrong_type)),
+        ];
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let parser = PdfExtractParser::new();
+
+        for (case, entry) in invalid_entries {
+            let mut malformed = document.clone();
+            malformed.trailer.set("Encrypt", entry);
+            let pdf = save_pdf(malformed);
+            let run = ingest_fixture(&mut conn, &pdf.0);
+
+            let error = parse_document(&mut conn, &parser, &run.run_id).expect_err(case);
+            assert_eq!(error.code(), "MALFORMED_PDF", "{case}");
+            let failed_run = db::get_pipeline_run(&conn, &run.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+            assert_eq!(failed_run.state, PipelineState::Failed, "{case}");
+            let failure = failed_run.failure.expect("failure should persist");
+            assert_eq!(failure.code, "MALFORMED_PDF", "{case}");
+            assert_eq!(failure.stage, Some(PipelineStage::Parse), "{case}");
+            assert!(!failure.recoverable, "{case}");
+            assert!(
+                db::get_parsed_document(&conn, &run.run_id)
+                    .expect("artifact query should work")
+                    .is_none(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
