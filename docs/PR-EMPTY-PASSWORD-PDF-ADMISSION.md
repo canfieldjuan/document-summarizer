@@ -70,8 +70,9 @@ permission-bit classifier. Doc Sum never guesses a nonempty credential.
 | Ordinary unencrypted PDF | Use the existing native extraction and page path. |
 | Supported encrypted PDF opened with the empty credential | Extract from the fully decoded in-memory document. A history flag recording original encryption does not refuse it. |
 | Structurally valid, supported encryption requiring a nonempty opening credential | Fail Parse with `PDF_PASSWORD_REQUIRED`, recoverable=false, and the message "This PDF requires a password. Password entry is not supported." No parsed artifact, OCR handoff or model stage is produced. |
-| Malformed encryption dictionary, missing/wrong-typed required fields, invalid reference, or corrupt encrypted contents | Fail Parse with `MALFORMED_PDF`, recoverable=false. Do not classify structural failure as a request for a password or as an unread page eligible for OCR. |
+| Malformed encryption dictionary, missing/wrong-typed required fields, invalid reference, or reader-detected corrupt encrypted contents | Fail Parse with `MALFORMED_PDF`, recoverable=false. Do not classify structural failure as a request for a password or as an unread page eligible for OCR. |
 | Well-formed but unsupported security handler, encryption version or revision | Fail Parse with `PDF_ENCRYPTION_UNSUPPORTED`, recoverable=false. An unsupported encryption feature must not be reported as a wrong password. |
+| Structurally valid direct `/Encrypt` dictionary that the reader cannot open | Fail Parse with `PDF_ENCRYPTION_UNSUPPORTED`, recoverable=false. The same required-field checks apply to direct and referenced dictionaries. Neither refusal produces a parsed artifact or OCR handoff. |
 | Source bytes changed after ingestion | Preserve `SOURCE_CONTENT_CHANGED` before PDF admission. |
 
 Classify failures using the existing typed PDF, object, encryption and password
@@ -80,6 +81,14 @@ have different meaning from malformed dictionaries and unsupported handlers.
 The loader can suppress an initial authentication error, so the owner must
 validate any remaining `/Encrypt` entry through those APIs before deciding the
 failure class. A returned partial document cannot reach page enumeration.
+
+The PDF Association's Arlington file-trailer model permits a direct `/Encrypt`
+dictionary. Inspect the typed trailer value and validate the dictionary with
+the PDF library's Standard-handler parser. Missing or wrong-typed required
+fields fail as malformed in either representation. A non-dictionary value,
+dangling reference or non-dictionary target is malformed.
+[Arlington file-trailer model](https://github.com/pdf-association/arlington-pdf-model/blob/master/tsv/latest/FileTrailer.tsv)
+
 Inspect parsed objects, not regexes, raw `/Encrypt` substring searches, exception
 messages or a second independent PDF parser. A dependency change requires its
 own contract amendment if the pinned APIs cannot represent the necessary proof.
@@ -114,8 +123,8 @@ One app-internal native-PDF opening owner in `pipeline/parser.rs` returns
 `Result<PdfDocument, PipelineFailure>` only after the admission rule above holds.
 `PdfExtractParser::parse_inner` and the original-source OCR page-count path
 delegate to that owner. The latter may translate its typed failure into the
-existing OCR error envelope. Remove their independent original-source loading
-and blanket native-encryption checks. No public API export is required.
+existing OCR error envelope. Replace the two independent loads and retire the
+native parser's blanket encryption refusal. No public API export is required.
 
 A successfully read original PDF with a scan or mixed unread pages keeps the
 existing parser-owned visual markers and `ParsedDocument::requires_ocr()` rule.
@@ -216,9 +225,11 @@ those genuine pages can continue through the existing OCR eligibility rule.
 
 - Base the backport on the published `lopdf 0.42.0` archive. Its SHA-256 is
   `25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c`.
-  Use a single Cargo source override pinned to the reviewed source revision
-  for Doc Sum and `pdf-extract 0.12.0`. Record the source diff and lockfile
-  resolution for both callers.
+  Vendor the backport under `src-tauri/vendor/lopdf` with its MIT license and
+  a record of the archive and patch. A single relative `[patch.crates-io]` in
+  `src-tauri/Cargo.toml` resolves both Doc Sum and `pdf-extract 0.12.0` to
+  those committed bytes on Linux and Windows. Record the source diff and
+  verify the lockfile resolves a single copy for both callers.
 - Provide an opt-in in-memory load for original PDFs that propagates encrypted
   object-load failures at the encrypted reader. Return the existing typed
   `Error::Decryption` on the demonstrated decrypt failure before inserting a
@@ -231,6 +242,15 @@ those genuine pages can continue through the existing OCR eligibility rule.
   entry, authentication and handler results for the other failure classes
   already defined above. Admit empty-password originals after the checked
   in-memory load. Keep the exact original-byte identity for custody and OCR.
+
+RC4 ciphertext damage and AES damage that preserves valid padding can
+produce incorrect plaintext without a decryptor error. This amendment
+preserves typed failures the reader observes. Detecting the remaining cases
+depends on whether subsequent decoding detects the damage.
+
+Prepare the isolated reader change and synthetic regression for upstream
+submission after local proof. Replace the override when a compatible
+upstream release passes the same regressions.
 
 For implementation verification, replay the retained intact and corrupt
 AES fixtures through the checked loader and the real app parser. The same
@@ -278,11 +298,14 @@ Published references use synthetic aliases, counts, source pins and SHA-256.
    page warnings, normalization and citation page spans, not a matching substring.
    Include one-page, multi-page, Unicode-capable existing fixtures, and restricted
    permission flags. Keep the new policy independent of filename and metadata.
-5. Cover nonempty-required credentials, a direct `/Encrypt` dictionary,
-   dangling reference and non-dictionary target, missing or wrong-typed required
-   encryption fields, unsupported handler/version, and corrupt encrypted
-   content. Check the distinct failure class, persisted failed state and absent
-   parsed artifact/handoff/child. An explicitly empty
+5. Compare a complete direct `/Encrypt` dictionary with its referenced
+   twin. Check the direct form's unsupported result and the referenced form's
+   empty-password admission. In both forms, require `MALFORMED_PDF` for
+   missing or wrong-typed required fields. Cover a dangling reference,
+   non-dictionary value and target, nonempty-required credentials,
+   unsupported handler/version, and corrupt encrypted content. Check each
+   refusal's failure class, persisted failed state and absent parsed
+   artifact/handoff/child. An explicitly empty
    credential is the positive case, not a falsy value replaced by another secret.
 6. Cover encrypted image-only and mixed twins with unread pages first/middle/last.
    Check the existing visual markers and OCR eligibility. Through the real store
@@ -318,14 +341,20 @@ origin fix, passing original/isolated cases and the committed regression.
 
 ## Implementation summary
 
-The native opener now checks a remaining `/Encrypt` entry as a reference to
-a dictionary before enumerating pages. The baseline persisted an empty parsed
-artifact for a direct dictionary. The regression exercises that case, a
-dangling reference and a non-dictionary target through the real lifecycle and
-requires nonrecoverable `MALFORMED_PDF` with no parsed artifact. The reader
-backport and full empty-password admission are pending. The baseline control
+The baseline persisted an empty parsed artifact for an incomplete direct
+`/Encrypt` dictionary. Commit `488418f` refused that input, but its
+reference-only lookup also classified a complete direct dictionary as
+malformed. The native opener now branches on the typed trailer entry and
+reuses the library's Standard-handler dictionary validation. A complete
+direct dictionary returns `PDF_ENCRYPTION_UNSUPPORTED`. Incomplete and
+wrong-typed dictionaries in either form, dangling references and
+non-dictionary targets return `MALFORMED_PDF`. The lifecycle regression
+asserts the persisted failure and absence of a parsed artifact. The reader
+backport and empty-password admission are pending. The baseline control
 receipt `encryption-controls` has SHA-256
 `482bec6ea09c46a38e1c59a365a6ce30297ea186d58356e982db6b11e602d972`.
+The complete-direct fail-first receipt has SHA-256
+`108b36fddd9df7d3665c7c1d1027da1746bbffefe1e46508b9facd2a01080b5e`.
 
 ## Cold diff audit
 
