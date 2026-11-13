@@ -3,6 +3,7 @@ use crate::pipeline::contracts::{
     PipelineWarning, SourceType,
 };
 use crate::pipeline::db::{self, StoreError};
+use lopdf::encryption::{DecryptionError, PasswordAlgorithm};
 use lopdf::{
     content::Content, decode_text_string, Dictionary as PdfDictionary, Object as PdfObject,
     ObjectId,
@@ -146,13 +147,23 @@ impl PdfExtractParser {
 
 fn open_native_pdf(source: &[u8]) -> Result<PdfDocument, PipelineFailure> {
     let pdf = PdfDocument::load_mem(source).map_err(map_load_error)?;
-    let has_encrypt_entry = pdf.trailer.has(b"Encrypt");
-    if has_encrypt_entry {
-        // A partial load can retain a malformed encryption entry. Validate it
-        // before enumerating pages.
-        pdf.get_encrypted().map_err(map_load_error)?;
-    }
-    if has_encrypt_entry || pdf.was_encrypted() {
+    let encrypted = match pdf.trailer.get(b"Encrypt") {
+        Ok(PdfObject::Dictionary(dictionary)) => {
+            // Give the library's reference-based validator a metadata-only
+            // document containing the direct dictionary.
+            let mut metadata = PdfDocument::new();
+            let id = metadata.add_object(dictionary.clone());
+            metadata.trailer.set("Encrypt", id);
+            validate_encryption_dictionary(&metadata).map_err(map_load_error)?;
+            return Err(unsupported_pdf_encryption());
+        }
+        Ok(_) => {
+            validate_encryption_dictionary(&pdf).map_err(map_load_error)?;
+            true
+        }
+        Err(_) => pdf.was_encrypted(),
+    };
+    if encrypted {
         return Err(parse_failure(
             "ENCRYPTED_PDF_UNSUPPORTED",
             "Encrypted PDFs are not supported in the native-text parser",
@@ -160,6 +171,15 @@ fn open_native_pdf(source: &[u8]) -> Result<PdfDocument, PipelineFailure> {
         ));
     }
     Ok(pdf)
+}
+
+fn validate_encryption_dictionary(pdf: &PdfDocument) -> Result<(), LopdfError> {
+    let handler = pdf.get_encrypted()?.get(b"Filter")?.as_name()?;
+    if handler != b"Standard" {
+        return Err(LopdfError::UnsupportedSecurityHandler(handler.to_vec()));
+    }
+    PasswordAlgorithm::try_from(pdf)?;
+    Ok(())
 }
 
 fn verified_source_bytes(document: &IngestedDocument) -> Result<Vec<u8>, PipelineFailure> {
@@ -862,12 +882,26 @@ fn map_load_error(error: LopdfError) -> PipelineFailure {
             "Encrypted PDFs are not supported in the native-text parser",
             false,
         ),
+        LopdfError::UnsupportedSecurityHandler(_)
+        | LopdfError::Decryption(
+            DecryptionError::UnsupportedEncryption
+            | DecryptionError::UnsupportedVersion
+            | DecryptionError::UnsupportedRevision,
+        ) => unsupported_pdf_encryption(),
         other => parse_failure(
             "MALFORMED_PDF",
             format!("The PDF structure could not be parsed: {other}"),
             false,
         ),
     }
+}
+
+fn unsupported_pdf_encryption() -> PipelineFailure {
+    parse_failure(
+        "PDF_ENCRYPTION_UNSUPPORTED",
+        "This PDF uses an encryption format the native PDF reader cannot open",
+        false,
+    )
 }
 
 fn parse_failure(
@@ -2046,6 +2080,111 @@ mod tests {
     }
 
     #[test]
+    fn direct_encryption_dictionary_is_classified_by_its_contents() {
+        let mut referenced = build_pdf(vec![FixturePage::Text(b"ENCRYPTED".to_vec())]);
+        referenced.reference_table.cross_reference_type =
+            lopdf::xref::XrefType::CrossReferenceTable;
+        referenced.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::string_literal("fixture-id-one"),
+                Object::string_literal("fixture-id-two"),
+            ]),
+        );
+        let state = EncryptionState::try_from(EncryptionVersion::V1 {
+            document: &referenced,
+            owner_password: "owner-password",
+            user_password: "",
+            permissions: Permissions::PRINTABLE,
+        })
+        .expect("fixture encryption state");
+        referenced.encrypt(&state).expect("fixture should encrypt");
+
+        let encryption_id = referenced
+            .trailer
+            .get(b"Encrypt")
+            .and_then(Object::as_reference)
+            .expect("encrypted fixture reference");
+        let dictionary = referenced
+            .get_encrypted()
+            .expect("complete Standard encryption dictionary")
+            .clone();
+        let control = save_pdf(referenced.clone());
+        let opened = PdfDocument::load_mem(&fs::read(&control.0).expect("referenced fixture"))
+            .expect("referenced fixture should open with the empty password");
+        assert!(opened.was_encrypted());
+        let mut text = String::new();
+        output_doc_page(&opened, &mut PlainTextOutput::new(&mut text), 1)
+            .expect("referenced page should extract");
+        assert_eq!(text.trim(), "ENCRYPTED");
+
+        let mut direct = referenced.clone();
+        direct.objects.remove(&encryption_id);
+        direct.trailer.set("Encrypt", dictionary);
+        let mut missing = direct.clone();
+        missing
+            .trailer
+            .get_mut(b"Encrypt")
+            .and_then(Object::as_dict_mut)
+            .expect("direct dictionary")
+            .remove(b"U");
+        let mut wrong_type = direct.clone();
+        wrong_type
+            .trailer
+            .get_mut(b"Encrypt")
+            .and_then(Object::as_dict_mut)
+            .expect("direct dictionary")
+            .set("P", "not-an-integer");
+        let mut referenced_missing = referenced.clone();
+        referenced_missing
+            .get_dictionary_mut(encryption_id)
+            .expect("referenced dictionary")
+            .remove(b"U");
+        let mut referenced_wrong_type = referenced;
+        referenced_wrong_type
+            .get_dictionary_mut(encryption_id)
+            .expect("referenced dictionary")
+            .set("P", "not-an-integer");
+
+        let mut conn = db::init_db(":memory:").expect("schema should initialize");
+        let parser = PdfExtractParser::new();
+        for (case, document, expected) in [
+            ("complete direct", direct, "PDF_ENCRYPTION_UNSUPPORTED"),
+            ("missing direct field", missing, "MALFORMED_PDF"),
+            ("wrong direct field type", wrong_type, "MALFORMED_PDF"),
+            (
+                "missing referenced field",
+                referenced_missing,
+                "MALFORMED_PDF",
+            ),
+            (
+                "wrong referenced field type",
+                referenced_wrong_type,
+                "MALFORMED_PDF",
+            ),
+        ] {
+            let pdf = save_pdf(document);
+            let run = ingest_fixture(&mut conn, &pdf.0);
+            let error = parse_document(&mut conn, &parser, &run.run_id).expect_err(case);
+            assert_eq!(error.code(), expected, "{case}");
+            let failed = db::get_pipeline_run(&conn, &run.run_id)
+                .expect("run should load")
+                .expect("run should exist");
+            assert_eq!(failed.state, PipelineState::Failed, "{case}");
+            let failure = failed.failure.expect("failure should persist");
+            assert_eq!(failure.code, expected, "{case}");
+            assert_eq!(failure.stage, Some(PipelineStage::Parse), "{case}");
+            assert!(!failure.recoverable, "{case}");
+            assert!(
+                db::get_parsed_document(&conn, &run.run_id)
+                    .expect("artifact query should work")
+                    .is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_encrypt_reference_never_persists_a_parsed_artifact() {
         let mut document = build_pdf(vec![FixturePage::Text(b"PAGE".to_vec())]);
         let wrong_type = document.add_object(Object::Integer(17));
@@ -2057,6 +2196,7 @@ mod tests {
             ),
             ("missing object", Object::Reference(missing)),
             ("wrong object type", Object::Reference(wrong_type)),
+            ("non-dictionary entry", Object::Integer(17)),
         ];
         let mut conn = db::init_db(":memory:").expect("schema should initialize");
         let parser = PdfExtractParser::new();
