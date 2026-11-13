@@ -9,6 +9,19 @@ It reports typed authentication, object decryption, and required stream
 decoding failures before returning the document. The regular load entry
 points still use the upstream recovery path.
 
+- For encryption version 4 and later, resolves the declared crypt filters
+  for strings, streams, and embedded files. It uses Identity when the string
+  or stream filter is omitted and applies an explicit first-stage `/Crypt`
+  filter before decoding the remaining stream filters.
+- For Standard security revisions 2–4, derives the file key from the user
+  password recovered when the empty credential authenticates as the owner.
+- Validates all four permission bytes in the AES-256 `/Perms` entry after
+  empty-password authentication.
+- Checks the declared stream length against the stream boundary and decodes
+  object streams and required page content before returning the document.
+  The checked decoder supports Flate, LZW, and ASCII85 and reports failures
+  to the caller.
+
 The isolated source delta is recorded as `lopdf-reader-backport.patch` in the
 issue #133 evidence packet. Its SHA-256 is
 `ea395bb751216c873b01fb50562b201d415fb4d262536bc01597da6ea682fc79`.
