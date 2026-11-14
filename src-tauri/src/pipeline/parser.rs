@@ -1058,6 +1058,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
+    include!("parser_layout_tests.rs");
+
     enum FixturePage {
         Text(Vec<u8>),
         Empty,
