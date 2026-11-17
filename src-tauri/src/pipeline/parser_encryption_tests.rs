@@ -195,22 +195,8 @@ fn empty_owner_password_recovers_the_user_key_for_rc4() {
 
 #[test]
 fn aes256_with_invalid_permissions_is_malformed_after_authentication() {
-    use lopdf::encryption::crypt_filters::Aes256CryptFilter;
     let mut pdf = build_pdf(vec![FixturePage::Text(b"AES-256 synthetic page".to_vec())]);
-    set_file_ids(&mut pdf);
-    let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
-    let state = EncryptionState::try_from(EncryptionVersion::V5 {
-        encrypt_metadata: true,
-        crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
-        file_encryption_key: &[42; 32],
-        stream_filter: b"StdCF".to_vec(),
-        string_filter: b"StdCF".to_vec(),
-        owner_password: "owner-password",
-        user_password: "",
-        permissions: Permissions::PRINTABLE,
-    })
-    .unwrap();
-    pdf.encrypt(&state).unwrap();
+    let state = encrypt_aes256(&mut pdf);
     let valid = pdf_bytes(pdf.clone());
     let path = TestPath::write("pdf", &valid);
     let mut conn = db::init_db(":memory:").unwrap();
@@ -590,4 +576,148 @@ fn checked_stream_decryption_consumes_crypt_filter_and_decrypts_dictionary_strin
     let mut text = String::new();
     output_doc_page(&opened, &mut PlainTextOutput::new(&mut text), 1).unwrap();
     assert_eq!(text.trim(), "Encrypted Flate page");
+}
+
+fn encrypt_aes256(pdf: &mut PdfDocument) -> EncryptionState {
+    use lopdf::encryption::crypt_filters::Aes256CryptFilter;
+    set_file_ids(pdf);
+    let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
+    let state = EncryptionState::try_from(EncryptionVersion::V5 {
+        encrypt_metadata: true,
+        crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
+        file_encryption_key: &[42; 32],
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password: "owner-password",
+        user_password: "",
+        permissions: Permissions::PRINTABLE,
+    })
+    .unwrap();
+    pdf.encrypt(&state).unwrap();
+    state
+}
+
+fn check_signature_contents(encrypt: impl FnOnce(&mut PdfDocument), signature_type: Option<&str>) {
+    let mut pdf = build_pdf(vec![FixturePage::Text(b"Signed page".to_vec())]);
+    let mut signature = dictionary! {
+        "Filter" => "Adobe.PPKLite",
+        "ByteRange" => vec![0.into(), 100.into(), 200.into(), 100.into()],
+        "Reason" => Object::string_literal("Approval"),
+    };
+    if let Some(name) = signature_type {
+        signature.set("Type", name);
+    }
+    let id = pdf.add_object(signature);
+    let field = pdf.add_object(dictionary! { "FT" => "Sig", "V" => id });
+    pdf.catalog_mut()
+        .unwrap()
+        .set("AcroForm", dictionary! { "Fields" => vec![field.into()] });
+    let annotation = pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text",
+        "Contents" => Object::string_literal("Review this page"),
+    });
+    let page = pdf.get_pages()[&1];
+    pdf.get_dictionary_mut(page)
+        .unwrap()
+        .set("Annots", vec![annotation.into()]);
+    encrypt(&mut pdf);
+    // A signature writer fills the reserved Contents after encryption. This
+    // synthetic DER value exercises PDF admission, not signer authentication.
+    let contents = [0x30, 0x03, 0x02, 0x01, 0x01, 0, 0];
+    pdf.get_dictionary_mut(id).unwrap().set(
+        "Contents",
+        Object::String(contents.to_vec(), lopdf::StringFormat::Hexadecimal),
+    );
+    let bytes = pdf_bytes(pdf);
+    let path = TestPath::write("pdf", &bytes);
+    let mut conn = db::init_db(":memory:").unwrap();
+    let run = ingest_fixture(&mut conn, &path.0);
+    let parsed = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+    assert_eq!(parsed.pages[0].text.trim(), "Signed page");
+    let opened = PdfDocument::load_mem_checked_encryption(&bytes).unwrap();
+    let sig = opened.get_dictionary(id).unwrap();
+    assert_eq!(sig.get(b"Contents").unwrap().as_str().unwrap(), contents);
+    assert_eq!(sig.get(b"Reason").unwrap().as_str().unwrap(), b"Approval");
+    assert_eq!(
+        opened
+            .get_dictionary(annotation)
+            .unwrap()
+            .get(b"Contents")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        b"Review this page"
+    );
+}
+
+#[test]
+fn signature_contents_aes128() {
+    check_signature_contents(
+        |pdf| {
+            encrypt_aes(pdf);
+        },
+        Some("Sig"),
+    );
+}
+
+#[test]
+fn signature_contents_aes256_timestamp() {
+    check_signature_contents(
+        |pdf| {
+            encrypt_aes256(pdf);
+        },
+        Some("DocTimeStamp"),
+    );
+}
+
+#[test]
+fn signature_contents_rc4_implicit_type() {
+    check_signature_contents(|pdf| encrypt_rc4(pdf, ""), None);
+}
+
+#[test]
+fn signature_contents_exception_preserves_unsigned_padding_errors() {
+    let mut pdf = build_pdf(vec![FixturePage::Text(b"Unsigned page".to_vec())]);
+    let annotation = pdf.add_object(dictionary! {
+        "Type" => "Annot",
+        "Contents" => Object::string_literal("note"),
+        "ByteRange" => vec![0.into(), 100.into(), 200.into(), 100.into()],
+    });
+    encrypt_aes(&mut pdf);
+    let ciphertext = pdf
+        .get_dictionary_mut(annotation)
+        .unwrap()
+        .get_mut(b"Contents")
+        .unwrap()
+        .as_str_mut()
+        .unwrap();
+    // The final IV byte controls the last padding byte of this one-block string.
+    ciphertext[15] ^= 0xff;
+    let bytes = pdf_bytes(pdf);
+    assert!(matches!(
+        PdfDocument::load_mem_checked_encryption(&bytes),
+        Err(LopdfError::Decryption(DecryptionError::Padding))
+    ));
+    assert_parse_refusal(
+        &mut db::init_db(":memory:").unwrap(),
+        &bytes,
+        "unsigned Contents",
+        "MALFORMED_PDF",
+    );
+}
+
+#[test]
+fn detached_signed_encrypted_originals_parse_through_native_ingestion() {
+    let mut conn = db::init_db(":memory:").unwrap();
+    for original in [
+        include_bytes!("../../tests/fixtures/issue133-signed-r3.pdf").as_slice(),
+        include_bytes!("../../tests/fixtures/issue133-signed-r4.pdf").as_slice(),
+        include_bytes!("../../tests/fixtures/issue133-signed-r6.pdf").as_slice(),
+    ] {
+        let path = TestPath::write("pdf", original);
+        let run = ingest_fixture(&mut conn, &path.0);
+        let parsed = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id).unwrap();
+        assert_eq!(parsed.pages[0].text.trim(), "Signed fixture");
+        assert_eq!(fs::read(&path.0).unwrap(), original);
+    }
 }

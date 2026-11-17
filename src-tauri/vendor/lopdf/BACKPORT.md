@@ -17,12 +17,14 @@ points still use the upstream recovery path.
   password recovered when the empty credential authenticates as the owner.
 - Validates all four permission bytes in the AES-256 `/Perms` entry after
   empty-password authentication.
+- Preserves the cleartext signature value in a signature dictionary while
+  decrypting its other strings and ordinary annotation text.
 - Checks the declared stream length against the stream boundary and decodes
   object streams and required page content before returning the document.
   The checked decoder supports Flate, LZW, and ASCII85 and reports failures
   to the caller.
 
-The isolated source delta is recorded as `lopdf-reader-backport.patch` in the
+The initial source delta is recorded as `lopdf-reader-backport.patch` in the
 issue #133 evidence packet. Its SHA-256 is
 `ea395bb751216c873b01fb50562b201d415fb4d262536bc01597da6ea682fc79`.
 The packet also contains the reader-only test and its synthetic fixtures.

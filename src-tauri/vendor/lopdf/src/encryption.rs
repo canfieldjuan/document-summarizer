@@ -873,6 +873,19 @@ pub(crate) fn decrypt_object_checked(
     decrypt_object_internal(state, obj_id, obj, Some(dictionary))
 }
 
+// Type is optional for a signature dictionary. In its absence, recognize
+// the direct ByteRange offset/length pairs. An explicit other type wins.
+fn is_signature_dictionary(dict: &Dictionary) -> bool {
+    match dict.get(b"Type") {
+        Ok(kind) => matches!(kind.as_name(), Ok(b"Sig" | b"DocTimeStamp")),
+        Err(_) => dict.get(b"ByteRange").and_then(Object::as_array).is_ok_and(|range| {
+            !range.is_empty()
+                && range.len() % 2 == 0
+                && range.iter().all(|part| matches!(part, Object::Integer(n) if *n >= 0))
+        }),
+    }
+}
+
 fn decrypt_object_internal(
     state: &EncryptionState, obj_id: ObjectId, obj: &mut Object, checked_dictionary: Option<&Dictionary>,
 ) -> Result<(), DecryptionError> {
@@ -932,7 +945,12 @@ fn decrypt_object_internal(
             return Ok(());
         }
         Object::Dictionary(objects) => {
-            for (_, obj) in objects.iter_mut() {
+            let signature = checked_dictionary.is_some() && is_signature_dictionary(objects);
+            for (key, obj) in objects.iter_mut() {
+                // The signature value is stored verbatim even in an encrypted PDF.
+                if signature && key == b"Contents" && matches!(obj, Object::String(..)) {
+                    continue;
+                }
                 decrypt_object_internal(state, obj_id, obj, checked_dictionary)?;
             }
 
