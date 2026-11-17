@@ -3,6 +3,7 @@ use crate::pipeline::contracts::{
     PipelineWarning, SourceType,
 };
 use crate::pipeline::db::{self, StoreError};
+use lopdf::encryption::DecryptionError;
 use lopdf::{
     content::Content, decode_text_string, Dictionary as PdfDictionary, Object as PdfObject,
     ObjectId,
@@ -78,14 +79,7 @@ impl PdfExtractParser {
 
         let source_bytes = verified_source_bytes(document)?;
 
-        let pdf = PdfDocument::load_mem(&source_bytes).map_err(map_load_error)?;
-        if pdf.was_encrypted() || pdf.is_encrypted() {
-            return Err(parse_failure(
-                "ENCRYPTED_PDF_UNSUPPORTED",
-                "Encrypted PDFs are not supported in the native-text parser",
-                false,
-            ));
-        }
+        let pdf = open_native_pdf(&source_bytes)?;
 
         let source_page_numbers = pdf.get_pages().keys().copied().collect::<Vec<_>>();
         let mut parsed_pages = Vec::new();
@@ -149,6 +143,10 @@ impl PdfExtractParser {
             warnings: document_warnings,
         })
     }
+}
+
+pub(crate) fn open_native_pdf(source: &[u8]) -> Result<PdfDocument, PipelineFailure> {
+    PdfDocument::load_mem_checked_encryption(source).map_err(map_load_error)
 }
 
 fn verified_source_bytes(document: &IngestedDocument) -> Result<Vec<u8>, PipelineFailure> {
@@ -846,17 +844,32 @@ fn map_load_error(error: LopdfError) -> PipelineFailure {
             format!("The ingested source could not be reopened: {io_error}"),
             true,
         ),
-        LopdfError::InvalidPassword => parse_failure(
-            "ENCRYPTED_PDF_UNSUPPORTED",
-            "Encrypted PDFs are not supported in the native-text parser",
+        LopdfError::InvalidPassword
+        | LopdfError::Decryption(DecryptionError::IncorrectPassword) => parse_failure(
+            "PDF_PASSWORD_REQUIRED",
+            "This PDF requires a password. Password entry is not supported.",
             false,
         ),
+        LopdfError::UnsupportedSecurityHandler(_)
+        | LopdfError::Decryption(
+            DecryptionError::UnsupportedEncryption
+            | DecryptionError::UnsupportedVersion
+            | DecryptionError::UnsupportedRevision,
+        ) => unsupported_pdf_encryption(),
         other => parse_failure(
             "MALFORMED_PDF",
             format!("The PDF structure could not be parsed: {other}"),
             false,
         ),
     }
+}
+
+fn unsupported_pdf_encryption() -> PipelineFailure {
+    parse_failure(
+        "PDF_ENCRYPTION_UNSUPPORTED",
+        "This PDF uses an encryption format the native PDF reader cannot open",
+        false,
+    )
 }
 
 fn parse_failure(
@@ -1046,17 +1059,49 @@ fn validate_parsed_document(
 }
 
 #[cfg(test)]
+pub(crate) mod test_pdf_encryption {
+    use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions};
+
+    pub(crate) fn set_file_ids(pdf: &mut Document) {
+        pdf.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::string_literal("fixture-id-one"),
+                Object::string_literal("fixture-id-two"),
+            ]),
+        );
+    }
+
+    pub(crate) fn encrypt_rc4(pdf: &mut Document, user_password: &str) {
+        set_file_ids(pdf);
+        let state = EncryptionState::try_from(EncryptionVersion::V1 {
+            document: pdf,
+            owner_password: "owner-password",
+            user_password,
+            permissions: Permissions::PRINTABLE,
+        })
+        .unwrap();
+        pdf.encrypt(&state).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::contracts::{PipelineState, SourceType};
     use crate::pipeline::ingest::{ingest_pdf, prepare_pdf_ingestion_with_source_type};
     use pdf_extract::content::{Content, Operation};
-    use pdf_extract::{
-        dictionary, EncryptionState, EncryptionVersion, Object, Permissions, Stream, StringFormat,
-    };
+    use pdf_extract::{dictionary, Object, Stream, StringFormat};
     use std::fs;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
+
+    mod encryption {
+        use super::*;
+        use crate::pipeline::parser::test_pdf_encryption::{encrypt_rc4, set_file_ids};
+
+        include!("parser_encryption_tests.rs");
+    }
 
     enum FixturePage {
         Text(Vec<u8>),
@@ -2032,45 +2077,6 @@ mod tests {
             .expect("events should load")
             .iter()
             .any(|event| event.next_state == PipelineState::Parsed));
-    }
-
-    #[test]
-    fn encrypted_pdf_is_rejected_deterministically() {
-        let mut document = build_pdf(vec![FixturePage::Text(b"ENCRYPTED".to_vec())]);
-        document.trailer.set(
-            "ID",
-            Object::Array(vec![
-                Object::string_literal("fixture-id-one"),
-                Object::string_literal("fixture-id-two"),
-            ]),
-        );
-        let encryption = EncryptionState::try_from(EncryptionVersion::V1 {
-            document: &document,
-            owner_password: "owner-password",
-            user_password: "user-password",
-            permissions: Permissions::PRINTABLE,
-        })
-        .expect("encryption state should build");
-        document
-            .encrypt(&encryption)
-            .expect("fixture should encrypt");
-        let pdf = save_pdf(document);
-        let mut conn = db::init_db(":memory:").expect("schema should initialize");
-        let run = ingest_fixture(&mut conn, &pdf.0);
-
-        let error = parse_document(&mut conn, &PdfExtractParser::new(), &run.run_id)
-            .expect_err("encrypted PDF should be unsupported");
-
-        assert_eq!(error.code(), "ENCRYPTED_PDF_UNSUPPORTED");
-        assert_eq!(
-            db::get_pipeline_run(&conn, &run.run_id)
-                .expect("run should load")
-                .expect("run should exist")
-                .failure
-                .expect("failure should persist")
-                .code,
-            "ENCRYPTED_PDF_UNSUPPORTED"
-        );
     }
 
     #[test]
