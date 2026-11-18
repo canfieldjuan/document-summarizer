@@ -721,3 +721,69 @@ fn detached_signed_encrypted_originals_parse_through_native_ingestion() {
         assert_eq!(fs::read(&path.0).unwrap(), original);
     }
 }
+
+mod untyped_byte_range {
+    use super::*;
+
+    fn fixture(range: Vec<Object>) -> (Vec<u8>, lopdf::ObjectId, Vec<u8>) {
+        let mut pdf = build_pdf(vec![FixturePage::Text(b"Probe page".to_vec())]);
+        let id = pdf.add_object(dictionary! {
+            "Contents" => Object::string_literal("note"),
+            "ByteRange" => range,
+        });
+        encrypt_aes(&mut pdf);
+        let contents = pdf
+            .get_dictionary_mut(id)
+            .unwrap()
+            .get_mut(b"Contents")
+            .unwrap()
+            .as_str_mut()
+            .unwrap();
+        // Flip the last IV byte so decrypting the one-block string must fail padding.
+        contents[15] ^= 0xff;
+        let stored = contents.clone();
+        (pdf_bytes(pdf), id, stored)
+    }
+
+    #[test]
+    fn integer_pairs_preserve_contents() {
+        let (bytes, id, expected) = fixture(vec![0.into(), 100.into(), 200.into(), 100.into()]);
+        let opened = PdfDocument::load_mem_checked_encryption(&bytes).unwrap();
+        let actual = opened
+            .get_dictionary(id)
+            .unwrap()
+            .get(b"Contents")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_padding_error(range: Vec<Object>) {
+        let (bytes, _, _) = fixture(range);
+        assert!(matches!(
+            PdfDocument::load_mem_checked_encryption(&bytes),
+            Err(LopdfError::Decryption(DecryptionError::Padding))
+        ));
+    }
+
+    #[test]
+    fn empty_array() {
+        assert_padding_error(vec![]);
+    }
+
+    #[test]
+    fn odd_length() {
+        assert_padding_error(vec![0.into(), 100.into(), 200.into()]);
+    }
+
+    #[test]
+    fn negative_integer() {
+        assert_padding_error(vec![0.into(), (-1).into(), 200.into(), 100.into()]);
+    }
+
+    #[test]
+    fn real_element() {
+        assert_padding_error(vec![0.into(), Object::Real(100.5), 200.into(), 100.into()]);
+    }
+}
