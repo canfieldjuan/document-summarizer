@@ -1,0 +1,4 @@
+
+# Local packaging policy: preserve retained upstream source formatting.
+# Application formatting is still enforced by cargo fmt --all -- --check.
+disable_all_formatting = true

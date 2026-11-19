@@ -40,6 +40,8 @@ pub enum Object {
     Boolean(bool),
     Integer(i64),
     Real(f32),
+    /// Original decimal parsed directly as f64, only on explicit precise loads.
+    Real64(f64),
     Name(Vec<u8>),
     String(Vec<u8>, StringFormat),
     Array(Vec<Object>),
@@ -185,6 +187,19 @@ impl Object {
         }
     }
 
+    /// Numeric access without narrowing the precise representation.
+    pub fn as_float64(&self) -> Result<f64> {
+        match self {
+            Object::Integer(value) => Ok(*value as f64),
+            Object::Real(value) => Ok(f64::from(*value)),
+            Object::Real64(value) => Ok(*value),
+            _ => Err(Error::ObjectType {
+                expected: "Integer or Real",
+                found: self.enum_variant(),
+            }),
+        }
+    }
+
     pub fn as_name(&self) -> Result<&[u8]> {
         match self {
             Object::Name(name) => Ok(name),
@@ -303,6 +318,7 @@ impl Object {
             Object::Boolean(_) => "Boolean",
             Object::Integer(_) => "Integer",
             Object::Real(_) => "Real",
+            Object::Real64(_) => "Real64",
             Object::Name(_) => "Name",
             Object::String(_, _) => "String",
             Object::Array(_) => "Array",
@@ -320,6 +336,7 @@ impl fmt::Debug for Object {
             Object::Boolean(value) => write!(f, "{value}"),
             Object::Integer(value) => write!(f, "{value}"),
             Object::Real(value) => write!(f, "{value}"),
+            Object::Real64(value) => write!(f, "{value}"),
             Object::Name(name) => write!(f, "/{}", String::from_utf8_lossy(name)),
             Object::String(text, StringFormat::Literal) => write!(f, "({})", String::from_utf8_lossy(text)),
             Object::String(text, StringFormat::Hexadecimal) => {

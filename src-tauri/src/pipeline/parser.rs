@@ -1096,6 +1096,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
+    include!("parser_layout_tests.rs");
+
     mod encryption {
         use super::*;
         use crate::pipeline::parser::test_pdf_encryption::{encrypt_rc4, set_file_ids};

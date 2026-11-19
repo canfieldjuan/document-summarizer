@@ -1,8 +1,8 @@
 use super::{Dictionary, Object, ObjectId, Reader, Stream, StringFormat};
-use crate::Error;
 use crate::content::*;
 use crate::error;
 use crate::xref::*;
+use crate::{Error, NumericPrecision};
 use std::collections::HashSet;
 use std::str::{self, FromStr};
 
@@ -96,7 +96,7 @@ fn integer(input: ParserInput) -> NomResult<i64> {
     convert_result(i64::from_str(str::from_utf8(int_input).unwrap()), i, ErrorKind::Digit)
 }
 
-fn real(input: ParserInput) -> NomResult<f32> {
+fn real(input: ParserInput, precision: NumericPrecision) -> NomResult<Object> {
     let (i, _) = pair(
         opt(one_of("+-")),
         alt((
@@ -107,7 +107,11 @@ fn real(input: ParserInput) -> NomResult<f32> {
     .parse(input)?;
 
     let float_input = &input[..input.len() - i.len()];
-    convert_result(f32::from_str(str::from_utf8(float_input).unwrap()), i, ErrorKind::Digit)
+    let token = str::from_utf8(float_input).unwrap();
+    match precision {
+        NumericPrecision::Legacy => convert_result(f32::from_str(token).map(Object::Real), i, ErrorKind::Digit),
+        NumericPrecision::Precise => convert_result(f64::from_str(token).map(Object::Real64), i, ErrorKind::Digit),
+    }
 }
 
 pub(crate) fn hex_char(input: ParserInput) -> NomResult<u8> {
@@ -274,11 +278,11 @@ fn null(input: ParserInput) -> NomResult<Object> {
     map(tag(&b"null"[..]), |_| Object::Null).parse(input)
 }
 
-fn array(depth: usize) -> impl Fn(ParserInput) -> NomResult<Vec<Object>> {
+fn array(depth: usize, precision: NumericPrecision) -> impl Fn(ParserInput) -> NomResult<Vec<Object>> {
     move |input| {
         delimited(
             pair(tag(&b"["[..]), space),
-            many0(_direct_object(depth)),
+            many0(_direct_object(depth, precision)),
             tag(&b"]"[..]),
         )
         .parse(input)
@@ -286,17 +290,24 @@ fn array(depth: usize) -> impl Fn(ParserInput) -> NomResult<Vec<Object>> {
 }
 
 pub(crate) fn dictionary(input: ParserInput) -> NomResult<Dictionary> {
-    _dictionary(crate::reader::MAX_NESTING_DEPTH)(input)
+    _dictionary(crate::reader::MAX_NESTING_DEPTH, NumericPrecision::Legacy)(input)
 }
 
-fn _dictionary(depth: usize) -> impl Fn(ParserInput) -> NomResult<Dictionary> {
-    move |input| delimited(pair(tag(&b"<<"[..]), space), inner_dictionary(depth), tag(&b">>"[..])).parse(input)
+fn _dictionary(depth: usize, precision: NumericPrecision) -> impl Fn(ParserInput) -> NomResult<Dictionary> {
+    move |input| {
+        delimited(
+            pair(tag(&b"<<"[..]), space),
+            inner_dictionary(depth, precision),
+            tag(&b">>"[..]),
+        )
+        .parse(input)
+    }
 }
 
-fn inner_dictionary(depth: usize) -> impl Fn(ParserInput) -> NomResult<Dictionary> {
+fn inner_dictionary(depth: usize, precision: NumericPrecision) -> impl Fn(ParserInput) -> NomResult<Dictionary> {
     move |input| {
         fold_many0(
-            pair(terminated(name, space), _direct_object(depth)),
+            pair(terminated(name, space), _direct_object(depth, precision)),
             Dictionary::new,
             |mut dict, (key, value)| {
                 dict.set(key, value);
@@ -323,7 +334,7 @@ pub(crate) fn dict_dup(input: ParserInput) -> NomResult<Dictionary> {
             terminated(
                 pair(
                     terminated(name, space),
-                    _direct_object(crate::reader::MAX_NESTING_DEPTH),
+                    _direct_object(crate::reader::MAX_NESTING_DEPTH, NumericPrecision::Legacy),
                 ),
                 pair(tag(&b"def"[..]), multispace1),
             ),
@@ -352,7 +363,11 @@ pub(crate) fn checked_stream_data(buffer: &[u8], start: usize, length: usize) ->
 fn stream<'a>(
     input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>, defer_stream_data: bool,
 ) -> NomResult<'a, Object> {
-    let (i, dict) = terminated(dictionary, (space, tag(&b"stream"[..]), space0, eol)).parse(input)?;
+    let (i, dict) = terminated(
+        _dictionary(crate::reader::MAX_NESTING_DEPTH, reader.document.numeric_precision),
+        (space, tag(&b"stream"[..]), space0, eol),
+    )
+    .parse(input)?;
 
     if defer_stream_data {
         return Ok((i, Object::Stream(Stream::with_position(dict, input.len() - i.len()))));
@@ -392,35 +407,40 @@ fn reference(input: ParserInput) -> NomResult<Object> {
     map(terminated(object_id, tag(&b"R"[..])), Object::Reference).parse(input)
 }
 
-fn _direct_objects(depth: usize) -> impl Fn(ParserInput) -> NomResult<Object> {
+fn _direct_objects(depth: usize, precision: NumericPrecision) -> impl Fn(ParserInput) -> NomResult<Object> {
     move |input| {
         alt((
             null,
             boolean,
             reference,
-            map(real, Object::Real),
+            |i| real(i, precision),
             map(integer, Object::Integer),
             map(name, Object::Name),
             map(literal_string, Object::string_literal),
             hexadecimal_string,
-            map(array(depth), Object::Array),
-            map(_dictionary(depth), Object::Dictionary),
+            map(array(depth, precision), Object::Array),
+            map(_dictionary(depth, precision), Object::Dictionary),
         ))
         .parse(input)
     }
 }
 
-fn _direct_object(depth: usize) -> impl Fn(ParserInput) -> NomResult<Object> {
+fn _direct_object(depth: usize, precision: NumericPrecision) -> impl Fn(ParserInput) -> NomResult<Object> {
     move |input| {
         if depth == 0 {
             return Err(nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::TooLarge)));
         }
-        terminated(_direct_objects(depth - 1), space).parse(input)
+        terminated(_direct_objects(depth - 1, precision), space).parse(input)
     }
 }
 
+#[cfg(test)]
 pub fn direct_object(input: ParserInput) -> Option<Object> {
-    strip_nom(_direct_object(crate::reader::MAX_NESTING_DEPTH)(input))
+    direct_object_with_precision(input, NumericPrecision::Legacy)
+}
+
+pub fn direct_object_with_precision(input: ParserInput, precision: NumericPrecision) -> Option<Object> {
+    strip_nom(_direct_object(crate::reader::MAX_NESTING_DEPTH, precision)(input))
 }
 
 fn object<'a>(
@@ -429,7 +449,7 @@ fn object<'a>(
     terminated(
         alt((
             |input| stream(input, reader, already_seen, defer_stream_data),
-            _direct_objects(crate::reader::MAX_NESTING_DEPTH),
+            _direct_objects(crate::reader::MAX_NESTING_DEPTH, reader.document.numeric_precision),
         )),
         space,
     )
@@ -552,18 +572,26 @@ fn xref(input: ParserInput) -> NomResult<Xref> {
     .parse(input)
 }
 
-fn trailer(input: ParserInput) -> NomResult<Dictionary> {
-    delimited(pair(tag(&b"trailer"[..]), space), dictionary, space).parse(input)
+fn trailer(input: ParserInput, precision: NumericPrecision) -> NomResult<Dictionary> {
+    delimited(
+        pair(tag(&b"trailer"[..]), space),
+        _dictionary(crate::reader::MAX_NESTING_DEPTH, precision),
+        space,
+    )
+    .parse(input)
 }
 
 pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(Xref, Dictionary)> {
-    let xref_trailer = map(pair(xref, trailer), |(mut xref, trailer)| {
-        xref.size = trailer
-            .get(b"Size")
-            .and_then(Object::as_i64)
-            .map_err(|_| error::ParseError::InvalidTrailer)? as u32;
-        Ok((xref, trailer))
-    });
+    let xref_trailer = map(
+        pair(xref, |i| trailer(i, reader.document.numeric_precision)),
+        |(mut xref, trailer)| {
+            xref.size = trailer
+                .get(b"Size")
+                .and_then(Object::as_i64)
+                .map_err(|_| error::ParseError::InvalidTrailer)? as u32;
+            Ok((xref, trailer))
+        },
+    );
     alt((
         xref_trailer,
         (|input| {
@@ -617,41 +645,51 @@ fn operator(input: ParserInput) -> NomResult<String> {
     .parse(input)
 }
 
-fn operand(input: ParserInput) -> NomResult<Object> {
+fn operand(input: ParserInput, precision: NumericPrecision) -> NomResult<Object> {
     terminated(
         alt((
             null,
             boolean,
-            map(real, Object::Real),
+            |i| real(i, precision),
             map(integer, Object::Integer),
             map(name, Object::Name),
             map(literal_string, Object::string_literal),
             hexadecimal_string,
-            map(array(crate::reader::MAX_NESTING_DEPTH), Object::Array),
-            map(dictionary, Object::Dictionary),
+            map(array(crate::reader::MAX_NESTING_DEPTH, precision), Object::Array),
+            map(
+                _dictionary(crate::reader::MAX_NESTING_DEPTH, precision),
+                Object::Dictionary,
+            ),
         )),
         content_space,
     )
     .parse(input)
 }
 
-fn operation(input: ParserInput) -> NomResult<Operation> {
+fn operation(input: ParserInput, precision: NumericPrecision) -> NomResult<Operation> {
     map(
         preceded(
             many0(comment),
-            alt((inline_image, terminated(pair(many0(operand), operator), content_space))),
+            alt((
+                |i| inline_image(i, precision),
+                terminated(pair(many0(|i| operand(i, precision)), operator), content_space),
+            )),
         ),
         |(operands, operator)| Operation { operator, operands },
     )
     .parse(input)
 }
 
-fn inline_image(input: ParserInput) -> NomResult<(Vec<Object>, String)> {
-    preceded(pair(tag(&b"BI"[..]), content_space), cut(inline_image_impl)).parse(input)
+fn inline_image(input: ParserInput, precision: NumericPrecision) -> NomResult<(Vec<Object>, String)> {
+    preceded(
+        pair(tag(&b"BI"[..]), content_space),
+        cut(|i| inline_image_impl(i, precision)),
+    )
+    .parse(input)
 }
 
-fn inline_image_impl(input: ParserInput) -> NomResult<(Vec<Object>, String)> {
-    let (input, stream_dict) = inner_dictionary(crate::reader::MAX_NESTING_DEPTH).parse(input)?;
+fn inline_image_impl(input: ParserInput, precision: NumericPrecision) -> NomResult<(Vec<Object>, String)> {
+    let (input, stream_dict) = inner_dictionary(crate::reader::MAX_NESTING_DEPTH, precision).parse(input)?;
     let (input, _) = pair(tag(&b"ID"[..]), content_space).parse(input)?;
     match image_data_stream(input, stream_dict) {
         Ok((input, stream)) => {
@@ -744,23 +782,31 @@ fn image_data_stream(input: ParserInput, stream_dict: Dictionary) -> crate::Resu
     Ok((input, Stream::new(stream_dict, content.to_vec())))
 }
 
-fn _content(input: ParserInput) -> NomResult<Content<Vec<Operation>>> {
+fn _content(input: ParserInput, precision: NumericPrecision) -> NomResult<Content<Vec<Operation>>> {
     delimited(
         content_space,
-        map(many0(operation), |operations| Content { operations }),
+        map(many0(|i| operation(i, precision)), |operations| Content { operations }),
         many0(terminated(comment, content_space)),
     )
     .parse(input)
 }
 
 pub fn content(input: ParserInput) -> Option<Content<Vec<Operation>>> {
-    strip_nom(_content.parse(input))
+    content_with_precision(input, NumericPrecision::Legacy)
+}
+
+pub fn content_with_precision(input: ParserInput, precision: NumericPrecision) -> Option<Content<Vec<Operation>>> {
+    strip_nom(_content(input, precision))
 }
 
 pub fn content_strict(input: ParserInput) -> Result<Content<Vec<Operation>>, error::ParseError> {
-    let (rest, content) = _content
-        .parse(input)
-        .map_err(|_| error::ParseError::InvalidContentStream)?;
+    content_strict_with_precision(input, NumericPrecision::Legacy)
+}
+
+pub fn content_strict_with_precision(
+    input: ParserInput, precision: NumericPrecision,
+) -> Result<Content<Vec<Operation>>, error::ParseError> {
+    let (rest, content) = _content(input, precision).map_err(|_| error::ParseError::InvalidContentStream)?;
     if !rest.is_empty() {
         return Err(error::ParseError::InvalidContentStream);
     }
@@ -781,7 +827,7 @@ mod tests {
 
     #[test]
     fn parse_real_number() {
-        let real = |i| tstrip(real(i));
+        let real = |i| tstrip(real(i, NumericPrecision::Legacy)).and_then(|o| o.as_f32().ok());
 
         assert_eq!(real(test_span(b"0.12")), Some(0.12));
         assert_eq!(real(test_span(b"-.12")), Some(-0.12));
@@ -837,7 +883,7 @@ BT
 [(b) 20 (ut generally tak) 10 (e more space than \\311)] TJ
 T* (encoded streams.) Tj
 		";
-        let content = tstrip(_content(test_span(stream)));
+        let content = tstrip(_content(test_span(stream), NumericPrecision::Legacy));
         println!("{:?}", content);
         assert!(content.is_some());
     }
@@ -997,7 +1043,9 @@ EI
 ID
 00000z0z00zzz00z0zzz0zzzEI aazazaazzzaazazzzazzz
 EI";
-        let out = super::inline_image(test_span(input)).unwrap().1;
+        let out = super::inline_image(test_span(input), NumericPrecision::Legacy)
+            .unwrap()
+            .1;
         assert_eq!(&out.1, "BI");
         assert_eq!(
             &out.0[0].as_stream().unwrap().content,
@@ -1061,7 +1109,7 @@ EI";
             let mut input = Vec::with_capacity(depth * 2);
             input.extend(std::iter::repeat_n(b'[', depth));
             input.extend(std::iter::repeat_n(b']', depth));
-            let result = _direct_object(crate::reader::MAX_NESTING_DEPTH)(input.as_slice());
+            let result = _direct_object(crate::reader::MAX_NESTING_DEPTH, NumericPrecision::Legacy)(input.as_slice());
             assert!(result.is_err());
         });
     }
@@ -1077,7 +1125,7 @@ EI";
             for _ in 0..depth {
                 input.extend_from_slice(b">>");
             }
-            let result = _direct_object(crate::reader::MAX_NESTING_DEPTH)(input.as_slice());
+            let result = _direct_object(crate::reader::MAX_NESTING_DEPTH, NumericPrecision::Legacy)(input.as_slice());
             assert!(result.is_err());
         });
     }
@@ -1085,7 +1133,7 @@ EI";
     #[test]
     fn modestly_nested_array_still_parses() {
         let input = b"[[[[[1]]]]]";
-        let obj = _direct_object(crate::reader::MAX_NESTING_DEPTH)(test_span(input));
+        let obj = _direct_object(crate::reader::MAX_NESTING_DEPTH, NumericPrecision::Legacy)(test_span(input));
         assert!(obj.is_ok());
     }
 }

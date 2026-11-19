@@ -1,5 +1,13 @@
 use crate::Object;
 
+/// Decimal representation selected once for a load or content decode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NumericPrecision {
+    #[default]
+    Legacy,
+    Precise,
+}
+
 /// Type alias for the filter function used during PDF loading.
 ///
 /// The function receives an object ID and a mutable reference to the object,
@@ -37,6 +45,8 @@ pub struct LoadOptions {
     /// When `true`, reject non-conforming PDFs instead of silently accepting them.
     /// Defaults to `false` (lenient parsing).
     pub strict: bool,
+    /// Defaults to the original 32-bit representation.
+    pub numeric_precision: NumericPrecision,
 }
 
 impl std::fmt::Debug for LoadOptions {
@@ -45,6 +55,7 @@ impl std::fmt::Debug for LoadOptions {
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("filter", &self.filter.map(|_| "fn(..)"))
             .field("strict", &self.strict)
+            .field("numeric_precision", &self.numeric_precision)
             .finish()
     }
 }

@@ -21,6 +21,16 @@ impl Content<Vec<Operation>> {
         parser::content(data).ok_or(ParseError::InvalidContentStream.into())
     }
 
+    /// Decode with an explicitly selected decimal representation.
+    pub fn decode_with_precision(data: &[u8], precision: crate::NumericPrecision) -> Result<Self> {
+        parser::content_with_precision(data, precision).ok_or(ParseError::InvalidContentStream.into())
+    }
+
+    /// Strict decode with an explicitly selected decimal representation.
+    pub fn decode_strict_with_precision(data: &[u8], precision: crate::NumericPrecision) -> Result<Self> {
+        parser::content_strict_with_precision(data, precision).map_err(|e| e.into())
+    }
+
     /// Strict decode content operations.
     pub fn decode_strict(data: &[u8]) -> Result<Self> {
         parser::content_strict(data).map_err(|e| e.into())
@@ -38,7 +48,7 @@ impl Document {
     /// Get decoded page content;
     pub fn get_and_decode_page_content(&self, page_id: ObjectId) -> Result<Content<Vec<Operation>>> {
         let content_data = self.get_page_content(page_id)?;
-        Content::decode(&content_data)
+        Content::decode_with_precision(&content_data, self.numeric_precision)
     }
 
     /// Add content to a page. All existing content will be unchanged.
@@ -91,7 +101,7 @@ impl Document {
             })
             .collect();
         let content_data = self.get_page_content(page_id)?;
-        let content = Content::decode(&content_data)?;
+        let content = Content::decode_with_precision(&content_data, self.numeric_precision)?;
 
         // each text with different encoding is extracted as separate chunk
         let mut current_encoding = None;
@@ -192,7 +202,7 @@ impl Document {
             .map(|(name, font)| font.get_font_encoding(self).map(|it| (name, it)))
             .collect::<Result<BTreeMap<Vec<u8>, Encoding>>>()?;
         let content_data = self.get_page_content(page_id)?;
-        let mut content = Content::decode(&content_data)?;
+        let mut content = Content::decode_with_precision(&content_data, self.numeric_precision)?;
         let mut current_encoding = None;
         for operation in &mut content.operations {
             match operation.operator.as_ref() {
@@ -235,7 +245,7 @@ impl Document {
             .collect::<Result<BTreeMap<Vec<u8>, Encoding>>>()?;
 
         let content_data = self.get_page_content(page_id)?;
-        let mut content = Content::decode(&content_data)?;
+        let mut content = Content::decode_with_precision(&content_data, self.numeric_precision)?;
         let mut current_encoding = None;
         let mut replacement_count = 0;
 
