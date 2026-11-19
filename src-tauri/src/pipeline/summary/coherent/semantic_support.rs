@@ -1132,14 +1132,10 @@ fn broader_enumeration_supported(claim: &str, evidence: &[&EvidenceItem]) -> boo
                     }))
         })
     };
-    if kinship_relative(claim)
-        && !evidence
+    !kinship_relative(claim)
+        || evidence
             .iter()
             .any(|item| kinship_relative(&item.exact_quote))
-    {
-        return false;
-    }
-    true
 }
 
 fn endpoint_word(word: &str) -> Option<String> {
@@ -2197,4 +2193,39 @@ pub(in crate::pipeline::summary) fn apply_semantic_fidelity_guards(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::broader_enumeration_supported;
+    use crate::pipeline::contracts::{EvidenceItem, SourceSpan, SourceType};
+
+    #[test]
+    fn kinship_claim_requires_matching_evidence() {
+        let evidence = |id: &str, quote: &str| EvidenceItem {
+            evidence_id: id.into(),
+            chunk_id: "chunk-1".into(),
+            block_id: "block-1".into(),
+            claim_text: quote.into(),
+            exact_quote: quote.into(),
+            source_span: SourceSpan {
+                page_start: 1,
+                page_end: 1,
+                section_id: None,
+                source_type: SourceType::NativeText,
+            },
+        };
+        let unrelated = evidence("unrelated", "Costs fell relative to last year.");
+        let matching = evidence("matching", "Their relatives are eligible.");
+        let claim = "A relative of the owner is eligible.";
+
+        assert!(broader_enumeration_supported(&unrelated.exact_quote, &[]));
+        assert!(!broader_enumeration_supported(claim, &[]));
+        assert!(!broader_enumeration_supported(claim, &[&unrelated]));
+        assert!(broader_enumeration_supported(claim, &[&matching]));
+        assert!(broader_enumeration_supported(
+            claim,
+            &[&unrelated, &matching]
+        ));
+    }
 }

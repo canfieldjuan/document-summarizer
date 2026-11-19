@@ -809,9 +809,22 @@ impl Stream {
     }
 
     pub fn decompressed_content(&self) -> Result<Vec<u8>> {
+        self.decompressed_content_internal(false)
+    }
+
+    pub(crate) fn decompress_checked(&mut self) -> Result<()> {
+        if self.is_compressed() {
+            let data = self.decompressed_content_internal(true)?;
+            self.set_plain_content(data);
+        }
+        Ok(())
+    }
+
+    fn decompressed_content_internal(&self, check_errors: bool) -> Result<Vec<u8>> {
         let params = self.dict.get(b"DecodeParms").and_then(Object::as_dict).ok();
         let filters = match self.filters() {
             Ok(f) => f,
+            Err(error) if check_errors && self.is_compressed() => return Err(error),
             // No /Filter key means the stream is uncompressed
             Err(_) => return Ok(self.content.clone()),
         };
@@ -822,8 +835,8 @@ impl Stream {
         // Filters are in decoding order.
         for filter in filters {
             output = match filter {
-                b"FlateDecode" => Self::decompress_zlib(input, params)?,
-                b"LZWDecode" => Self::decompress_lzw(input, params)?,
+                b"FlateDecode" => Self::decompress_zlib(input, params, check_errors)?,
+                b"LZWDecode" => Self::decompress_lzw(input, params, check_errors)?,
                 b"ASCII85Decode" => Self::decode_ascii85(input)?,
                 _ => return Err(Error::Unimplemented("decompression algorithms")),
             };
@@ -832,7 +845,7 @@ impl Stream {
         Ok(output)
     }
 
-    fn decompress_lzw(input: &[u8], params: Option<&Dictionary>) -> Result<Vec<u8>> {
+    fn decompress_lzw(input: &[u8], params: Option<&Dictionary>, check_errors: bool) -> Result<Vec<u8>> {
         use weezl::{BitOrder, decode::Decoder};
         const MIN_BITS: u8 = 9;
 
@@ -848,22 +861,19 @@ impl Stream {
             Decoder::new(BitOrder::Msb, MIN_BITS - 1)
         };
 
-        let output = Self::decompress_lzw_loop(input, &mut decoder);
-        Self::decompress_predictor(output, params)
-    }
-
-    fn decompress_lzw_loop(input: &[u8], decoder: &mut weezl::decode::Decoder) -> Vec<u8> {
         let mut output = vec![];
-
         let result = decoder.into_stream(&mut output).decode_all(input);
         if let Err(err) = result.status {
+            if check_errors {
+                return Err(DecompressError::Lzw(err).into());
+            }
             warn!("{err}");
         }
 
-        output
+        Self::decompress_predictor(output, params)
     }
 
-    fn decompress_zlib(input: &[u8], params: Option<&Dictionary>) -> Result<Vec<u8>> {
+    fn decompress_zlib(input: &[u8], params: Option<&Dictionary>, check_errors: bool) -> Result<Vec<u8>> {
         use flate2::read::ZlibDecoder;
         use std::io::prelude::*;
 
@@ -872,6 +882,9 @@ impl Stream {
         if !input.is_empty() {
             let mut decoder = ZlibDecoder::new(input);
             if let Err(err) = decoder.read_to_end(&mut output) {
+                if check_errors {
+                    return Err(DecompressError::Flate(err).into());
+                }
                 warn!("{err}");
                 // Zlib decompression failed (e.g. corrupt adler32 checksum in
                 // encrypted PDFs). Retry with raw deflate, skipping the 2-byte
@@ -1022,7 +1035,7 @@ mod test {
         }
 
         // Normal zlib should fail, but our fallback should recover
-        let result = Stream::decompress_zlib(&compressed, None).unwrap();
+        let result = Stream::decompress_zlib(&compressed, None, false).unwrap();
         assert_eq!(result, original);
     }
 

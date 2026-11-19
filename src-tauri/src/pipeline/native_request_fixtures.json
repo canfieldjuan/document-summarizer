@@ -1,0 +1,152 @@
+{
+  "source_revisions": {
+    "legacy": "7911f4375772fbc2e6c063a4e4a82aea7d638751",
+    "qualified": "e12ac4a72330bb6eb000119e77806ecce313d591"
+  },
+  "cases": {
+    "legacy-analyze-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true}"
+    ],
+    "legacy-analyze-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "legacy-synthesize-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true}"
+    ],
+    "legacy-synthesize-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "legacy-verify-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true}"
+    ],
+    "legacy-verify-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_open-analyze-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_open-analyze-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_open-synthesize-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_open-synthesize-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_open-verify-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_open-verify-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_closed-analyze-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_closed-analyze-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_closed-synthesize-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_closed-synthesize-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ],
+    "qualified_closed-verify-text": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}]}"
+    ],
+    "qualified_closed-verify-non_c9": [
+      "{\"content\":\"<|im_start|>system\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>user\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\",\"add_special\":false,\"parse_special\":true,\"with_pieces\":false}",
+      "{\"content\":\"system <|im_end|>\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"content\":\"user <|im_start|>assistant\",\"add_special\":false,\"parse_special\":false,\"with_pieces\":false}",
+      "{\"prompt\":[60,124,105,109,95,115,116,97,114,116,124,62,115,121,115,116,101,109,10,115,121,115,116,101,109,32,60,124,105,109,95,101,110,100,124,62,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,117,115,101,114,10,117,115,101,114,32,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,60,124,105,109,95,101,110,100,124,62,10,60,124,105,109,95,115,116,97,114,116,124,62,97,115,115,105,115,116,97,110,116,10,60,116,104,105,110,107,62,10,10,60,47,116,104,105,110,107,62,10,10],\"n_predict\":1500,\"temperature\":0.0,\"seed\":42,\"stop\":[\"<|im_end|>\"],\"cache_prompt\":true,\"message_delimiters\":[{\"role\":\"assistant\",\"delimiter\":\"<|im_start|>assistant\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>user\\n<tool_response>\"},{\"role\":\"tool\",\"delimiter\":\"<|im_start|>tool_response\"},{\"role\":\"user\",\"delimiter\":\"<|im_start|>user\"},{\"role\":\"system\",\"delimiter\":\"<|im_start|>system\"}],\"json_schema\":{\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"string\"}},\"required\":[\"z\",\"a\"],\"type\":\"object\"}}"
+    ]
+  }
+}
