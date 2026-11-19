@@ -1,0 +1,341 @@
+{
+  "fixtures": [
+    {
+      "alias": "missing-matrix",
+      "pdf_sha256": "e1697d2e6efbf57e239f5c9f3da347d7e9834f86873a0a6213a7dc32b3e4edb7",
+      "reference_sha256": "80b20f650f0c9813d401bf4f2ddac67c33ba1dfd529b29f4782ad6c85b000c90"
+    },
+    {
+      "alias": "identity-matrix",
+      "pdf_sha256": "94b8b69cf710c8c596b9285f76b8c40bf41fe6d0cdcb96b024fd9189af184f48",
+      "reference_sha256": "31ab11cf12646227c8eb788ede71a7f1b1d2a7dc55fa36e365daabd6b2415d76"
+    },
+    {
+      "alias": "caller-transform",
+      "pdf_sha256": "5fefc7b386ed6ff52121e24e0e33e5036d2e41d974ede16e875e308124f86649",
+      "reference_sha256": "443475a5910ae07be6c930d974e175839a68b46acad1ab593ee06831ab601399"
+    },
+    {
+      "alias": "form-transform",
+      "pdf_sha256": "965ffcc555425c5a681d12a1e9a51001a0dac22c6c8f684af61fe91cf05232cd",
+      "reference_sha256": "f355a4daef33157f9258aa99875057618a70cdf2d3a3b113a21e267dfa61a68a"
+    },
+    {
+      "alias": "nested-q-state",
+      "pdf_sha256": "d34f720a5974ad33cf1b76bbd0f1a4d971c822c7688402ecc248edb0a1a6bc46",
+      "reference_sha256": "64de2242ab9125690a6f4e634a5adf7f9f568b0e22ddd899a3bada1f92f1ef06"
+    },
+    {
+      "alias": "child-unbalanced-q",
+      "pdf_sha256": "43b44184a11e10ef48f4899a50c20862070495b2364b6cb81c8ecbbb381b2fe7",
+      "reference_sha256": "dae57f8768866d4b8d05576eb53a26cae2ca5dee58f67ad093ec04db304b74cd"
+    },
+    {
+      "alias": "direct-empty-resources",
+      "pdf_sha256": "5ec156d827691d5bf98ebf354ce0788b5a0f719e55c251d419396ba0344c806b",
+      "reference_sha256": "ffb2ab5293534ba495a2f33c04fe7c07811bddd43e9f5e78d4a4ba752afd4959"
+    },
+    {
+      "alias": "null-resources",
+      "pdf_sha256": "83aefb78204fc3d710b03dcd76660b0e602624f75c127fec492ae3ae7788f600",
+      "reference_sha256": "0d2328a79760289aaf39ce597b0153b9fc898406320c05de116627d208ec1276"
+    },
+    {
+      "alias": "indirect-empty-resources",
+      "pdf_sha256": "93028d40fd95b74b341c4cd28cbefd7f38a8c7d636a2026599692a077440253b",
+      "reference_sha256": "6bd37a80c41854c5f4d2839dc332ab6face0e4f66710719d66494fa7098920d8"
+    },
+    {
+      "alias": "resource-font-shadow",
+      "pdf_sha256": "776190cc8c01e710ee279ce6fc55c33f2aacfefecf464b1087b6009648568228",
+      "reference_sha256": "86783ee10659eb9c58196ac30f4915e10084cef249fdf825aac8a0e931ae0652"
+    },
+    {
+      "alias": "indirect-resources",
+      "pdf_sha256": "eba56ddca4a9e9d102b27a82fb378dee926868a8772475d0f2247fe8a57280e9",
+      "reference_sha256": "7e67087f836f3729c1c003bb26c231e722ee6ba72493147d668b208e1a5bf2b6"
+    },
+    {
+      "alias": "fresh-child-state",
+      "pdf_sha256": "6a3bbb820a09f91fcdad790667a7c41816ca2fc557114042d5030aa82d3c8d7c",
+      "reference_sha256": "21344518fbf7269315fc2083704d721f704d19527007b711deee8e4ad89ec891"
+    },
+    {
+      "alias": "repeated-form",
+      "pdf_sha256": "68717ae6bda2e22aceef6507e128d9b874ffcbc9ab6c2f4f38be6970d6aa6dfc",
+      "reference_sha256": "5dff60fcd14b1f00df804d9fe924af63d7ca189777350986e71f71935586181b"
+    },
+    {
+      "alias": "image-operator-bytes",
+      "pdf_sha256": "5a2f134fdab22a5775b8be17f3bc45822260fedf20415d0e2fb8a46f08fdbbe8",
+      "reference_sha256": "ce878d16c879b39658324f357d17a801560341e2b4362b109b9dfe53512649d9"
+    },
+    {
+      "alias": "mixed-image-form",
+      "pdf_sha256": "73947b2584b68b557091847d10d50ff802755b1aea02bd22eb3a426fc0c0e161",
+      "reference_sha256": "cea99e8d04909dd4e193b50bf07ae1b21ae01170ea30cb487019c7d0cd8a4162"
+    },
+    {
+      "alias": "image-missing-dimensions",
+      "pdf_sha256": "afa47ae2ed84221a1efd360d5ee33c2d3db7d0049be228b7478a8fba2ef35be5",
+      "reference_sha256": "e2f7de6876304522907dea27257c0ae8417a9d77fce53c0653313eff2fff8b01"
+    },
+    {
+      "alias": "unsupported-subtype",
+      "pdf_sha256": "e7c590210b385bba486ff5bba324dd7d94d688eb9f8230e7117598e5a5a59bae",
+      "reference_sha256": "87ef57dbb2245f170e794235f93c54397a90dcd175f682c5ac9759898dfc0049"
+    },
+    {
+      "alias": "missing-bbox",
+      "pdf_sha256": "3bf05eac75df8791bf02f249d2740117273ecd96f184309773864343398430b3",
+      "reference_sha256": "cf93b8da8ed23189bbee3621eb07698756f5d227610972b67b459ec2897b8344"
+    },
+    {
+      "alias": "empty-content",
+      "pdf_sha256": "185df574390243d7b7cc02666ea4265ccee1add14b66c1cbce6a8bbf6b881a58",
+      "reference_sha256": "d733bd8b1eabf82530ba8f733b175fed378a22c073d16671ed5a2fbe45da8b2b"
+    },
+    {
+      "alias": "bbox-null",
+      "pdf_sha256": "8657ca5a72067dce606fd435f5b7011337a56dfb2103cb0030e2b76692ede3be",
+      "dispatch_regression": true,
+      "reference_sha256": "cc2121a9800f1e656fee24cfe5cac0b2b45a64f59ddb536d395c11e1fb3c5479"
+    },
+    {
+      "alias": "bbox-indirect",
+      "pdf_sha256": "ef3ebfec5b62da920131bd480b3699c6728d043133db31d1ab447a7581df1758",
+      "dispatch_regression": true,
+      "reference_sha256": "c9c999abe7bc5e604f12c23c793849dd315ae10f4aef57985d44ea3b99b6e9f1"
+    },
+    {
+      "alias": "bbox-zero",
+      "pdf_sha256": "b8d9bed82b6acd996a52a6cdadb2580b27982c7608a2a3179960dc87866fc677",
+      "dispatch_regression": true,
+      "reference_sha256": "e88f307f0afc9943104b9cca141937338f85da9a289f0af366bc6eab448a53a8"
+    },
+    {
+      "alias": "subtype-indirect",
+      "pdf_sha256": "53e581b41d2f2ddf9f20327eaba3666b154701f219599dd9137e720453a91204",
+      "dispatch_regression": true,
+      "reference_sha256": "7a19c652bea7013dd1907a051b1d5a6bc7719117963918e1e2cb0d5453b0a80b"
+    },
+    {
+      "alias": "subtype-null",
+      "pdf_sha256": "1f61b77e4bc989cbcb4b7bb01bcf4ecf2a8181597a63678ecc4a9325321924c7",
+      "dispatch_regression": true,
+      "reference_sha256": "f17c53830af1b6d45382962c53c9a30d20cba3a0f2b40b07c90b398b751a6511"
+    },
+    {
+      "alias": "subtype-number",
+      "pdf_sha256": "e99e02429c24c1d7aa410169425681bc4d9aca9aefc873e1b0d24acca573df62",
+      "dispatch_regression": true,
+      "reference_sha256": "212dadaef8b1ca25f713990ab960cb148a405010f2d7be894d20677cf08aa1e0"
+    },
+    {
+      "alias": "subtype-missing",
+      "pdf_sha256": "dc3295699097d2d780a1f5ce715b95e5ca1ac2ec8428d3947d4864094a491989",
+      "dispatch_regression": true,
+      "reference_sha256": "c64cc3484af57d83683058f9853c60542bf7122e2f91b56cab772463d353f5df"
+    },
+    {
+      "alias": "image-with-bbox",
+      "pdf_sha256": "3702471fb1995fb3dcff4d1b984e619a3cf5425c2170c1fbc3211da0c20d6d4c",
+      "dispatch_regression": true,
+      "reference_sha256": "b41a9e9fa4ef4a13ffa1a7f6a6a53a4cb154fdde58c7ce5b817b09be7d8ef308"
+    },
+    {
+      "alias": "unsupported-with-bbox",
+      "pdf_sha256": "215aff9f4d42b20d4c1f75f6db047ad834e9f6369719b62e4de9b4d377163699",
+      "dispatch_regression": true,
+      "reference_sha256": "c211c09d6962aab78bc7bb253ad3a7ac900c1a8f9f1958cd854d1670f0e5fc48"
+    },
+    {
+      "alias": "matrix-null",
+      "pdf_sha256": "11a37c362848f0fdbf8b0ce160146b0375a0fc39d999755ae80594f14fae15c8",
+      "dispatch_regression": true,
+      "reference_sha256": "377b7e5904086e87dd83a88980f668c4a1f9339031580939ed2bf47091027f7a"
+    }
+  ],
+  "errors": [
+    {
+      "alias": "matrix-short",
+      "pdf_sha256": "47dcf43ea3f6696b323e43833dd673f043ecb00e3e719cfe10bc0e375492ea58",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-long",
+      "pdf_sha256": "d9aeafb5c6406e3877214f9ca3c71ebb0806b4d9cc402e0318a34a8338788a42",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-name",
+      "pdf_sha256": "a2fb3adb97745eed3b9a6cdd9fd1471111d4dd2a8cb015b67bf3e5591c47bb33",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-element",
+      "pdf_sha256": "37cd6d8acd06af1ce50c0ca107e50e7df8041eb285cb77caa722491a32a7e4cf",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-overflow",
+      "pdf_sha256": "50adda8c8e3a2556728b377f6a9a0d27d4fbe49e7034759dc18f95b711e473eb",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "resources-type",
+      "pdf_sha256": "acf98ac8a76bbf314f8f062940ca203d89c70e6ef66a2aeecad66e44093ac93a",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "resources-dangling",
+      "pdf_sha256": "c48c04182c6f3812fd9d6ccdb34c8e3f4615feea818de9eae2590392a48d2548",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "indirect-empty-no-parent-font",
+      "pdf_sha256": "4e8c350a89d2850424f0fa6ae046d6db3c4cf8d0153e451e2cb9375799522e74",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "do-missing-operand",
+      "pdf_sha256": "6d524de7a20ef75c743fb40a24298ca0332a0ac84f309de94be9e0914290a304",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "do-wrong-operand",
+      "pdf_sha256": "6579ee860e54f2cb2f465d1960f29271ecaceae4472a769709029640a4f304b3",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "do-extra-operand",
+      "pdf_sha256": "20c437a4589f89052e6bbde07d5913eafa9f2d286ce3f47fe7846825de4e2b25",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "xobject-name-missing",
+      "pdf_sha256": "008303ee81bcd3a544ae574e0418d61a308caec5786f8b0970d3f8df5fbb6432",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "xobject-dictionary-missing",
+      "pdf_sha256": "43ee9f425c75d26e05d82255aaee6d8113d95bb1a327c894b9eaefcc61d42684",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "xobject-dictionary-wrong-type",
+      "pdf_sha256": "7c8a102c7433eb8f60f6de8f920c47df8da1893762f72c581ab0c7600005f0a3",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "xobject-dangling",
+      "pdf_sha256": "6a164aa746ed7c0a2b84207c873c2a9f5b38da563125340c11859da45b0c5ea4",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "xobject-wrong-type",
+      "pdf_sha256": "5c6e05451e12e8e66889cbb09007a6fd4cf2d13deaa91b5b92840fe080dcd8ff",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "self-cycle",
+      "pdf_sha256": "99cbd7388eaf622288531e7595bbe740a150c388dfebecfff409a5105ff6e3c3",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "mutual-cycle",
+      "pdf_sha256": "1416cb83b7083d67d128a058d933871ff4d40303ef631041accc014b856e0cb3",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "alias-cycle",
+      "pdf_sha256": "f2ed7377c965b217b324a93a488b2cf09cf5daca9ef2dcf61ec88a2d7c304cd2",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "reference-cycle",
+      "pdf_sha256": "d8f9ebc3ea54e3b00caf91b33c3beed54c4ee48c0c84cef043673192841000f1",
+      "expected": "geometry error, no panic or successful partial page",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-number",
+      "pdf_sha256": "116b2fdaedbc18e736baa0df08085d4dc5b83abffe1b6c4590d82558c9115dfb",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-empty",
+      "pdf_sha256": "2f7cb0d6d825798c9cbb6516b34efce5a1a71677a4aef5e9a3fe3a9dfe2ba6df",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-short",
+      "pdf_sha256": "18b55efb510b7913bcffefa6f99b71aece1dbe1578e8b57939edff33aeec4c66",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-long",
+      "pdf_sha256": "1eaf6321d9a5aba195355ce131520d55852d72c31ae4f566f4e957a4c2619126",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "BBox",
+      "reference_parity": false
+    },
+    {
+      "alias": "bbox-nonnumeric",
+      "pdf_sha256": "0e4eccf601fda10fd9472e8e156e9529583610a4d8e80a5107c4a8d4564fec8b",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "",
+      "reference_parity": false
+    },
+    {
+      "alias": "matrix-real-nonfinite",
+      "pdf_sha256": "02a4d75303fff5ae2193872b0ccc720168317dadc3d2464001c2fc1c082fa4bd",
+      "dispatch_regression": true,
+      "expected": "geometry error, no panic or successful partial page",
+      "expected_error_contains": "nonfinite Form Matrix",
+      "reference_parity": false
+    }
+  ],
+  "geometry_comparison": {
+    "absolute_tolerance": 1e-09
+  },
+  "source": "unchanged pinned reference defaults; errors are accepted r6 native policy",
+  "model_calls": 0,
+  "corrections": [
+    {
+      "alias": "matrix-null",
+      "reason": "Own native-error misclassification; pinned parser drops direct-null entries. Original PDF unchanged, exact reference output now frozen.",
+      "previous_manifest": "r6-dispatch-before-manifest.json"
+    }
+  ]
+}

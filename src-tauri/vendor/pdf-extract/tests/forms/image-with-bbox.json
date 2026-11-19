@@ -1,0 +1,18 @@
+{
+  "alias": "image-with-bbox",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "3702471fb1995fb3dcff4d1b984e619a3cf5425c2170c1fbc3211da0c20d6d4c"
+}

@@ -716,3 +716,235 @@ fn decoder_precision_legacy_callback_cannot_request_precise_geometry() {
     let error = output_doc_page(&legacy, &mut LayoutEvents(Vec::new(), true), 1).unwrap_err();
     assert!(error.to_string().contains("precise document"));
 }
+
+#[test]
+fn decoder_form_direct_empty_resource_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    compare_geometry_root(&root, Some("direct-empty-resources"));
+}
+
+#[test]
+fn decoder_form_invocation_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    compare_geometry_root(&root, None);
+}
+
+#[test]
+fn decoder_form_dispatch_key_semantics() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    let mut failures = Vec::new();
+    for kind in ["fixtures", "errors"] {
+        for case in manifest[kind].as_array().unwrap() {
+            if case["dispatch_regression"] != true {
+                continue;
+            }
+            let alias = case["alias"].as_str().unwrap();
+            let document = pdf_extract::geometry::PreciseDocument::load(
+                root.join(format!("{alias}.pdf")),
+            ).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::geometry::extract_page_geometry(&document, 1)
+            }));
+            match result {
+                Ok(Ok(page)) if kind == "fixtures" => {
+                    let reference: serde_json::Value = serde_json::from_slice(
+                        &fs::read(root.join(format!("{alias}.json"))).unwrap(),
+                    ).unwrap();
+                    let expected: Vec<_> = reference["pages"][0]["chars"].as_array().unwrap()
+                        .iter().map(|c| c["text"].as_str().unwrap()).collect();
+                    let actual: Vec<_> = page.glyphs.iter().map(|g| g.text.as_str()).collect();
+                    if actual != expected {
+                        failures.push(format!("{alias}: expected {expected:?}, got {actual:?}"));
+                    }
+                }
+                Ok(Err(error)) if kind == "errors" => {
+                    let expected = case["expected_error_contains"].as_str().unwrap();
+                    if !error.to_string().contains(expected) {
+                        failures.push(format!("{alias}: wrong error owner: {error}"));
+                    }
+                }
+                Ok(Ok(_)) => failures.push(format!("{alias}: invalid page succeeded")),
+                Ok(Err(error)) => failures.push(format!("{alias}: unexpected error: {error}")),
+                Err(_) => failures.push(format!("{alias}: panicked")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn decoder_form_malformed_invocations_return_errors() {
+    check_form_errors(false);
+}
+
+#[test]
+fn decoder_form_cycles_return_errors() {
+    check_form_errors(true);
+}
+
+fn check_form_errors(cycles: bool) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    let mut failures = Vec::new();
+    for case in manifest["errors"].as_array().unwrap() {
+        let alias = case["alias"].as_str().unwrap();
+        if alias.contains("cycle") != cycles {
+            continue;
+        }
+        let document =
+            pdf_extract::geometry::PreciseDocument::load(root.join(format!("{alias}.pdf")))
+                .unwrap();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::geometry::extract_page_geometry(&document, 1)
+        })) {
+            Ok(Err(_)) => {}
+            Ok(Ok(_)) => {
+                failures.push(format!("{alias}: returned successful partial/invalid page"))
+            }
+            Err(_) => failures.push(format!("{alias}: panicked instead of returning an error")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn decoder_form_deep_acyclic_invocations_and_repeat_are_valid() {
+    let mut document = layout_pdf(vec![]);
+    let font_id = document.add_object(
+        dictionary! {"Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"},
+    );
+    let mut target = document.add_object(Stream::new(
+        dictionary! {
+            "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),612.into(),792.into()],
+            "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}}
+        },
+        Content {
+            operations: layout_text("F1", 12, 72, 716, "A"),
+        }
+        .encode()
+        .unwrap(),
+    ));
+    for _ in 0..4096 {
+        target = document.add_object(Stream::new(
+            dictionary! {
+                "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),612.into(),792.into()],
+                "Resources" => dictionary! {"XObject" => dictionary! {"Child" => target}}
+            },
+            b"/Child Do".to_vec(),
+        ));
+    }
+    let contents =
+        document.add_object(Stream::new(dictionary! {}, b"/Child Do /Child Do".to_vec()));
+    let page = document.get_pages()[&1];
+    let dict = document
+        .get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    dict.set(
+        "Resources",
+        dictionary! {"XObject" => dictionary! {"Child" => target}},
+    );
+    dict.set("Contents", contents);
+    let pdf = save_pdf(document);
+    let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
+    for _ in 0..2 {
+        let page = pdf_extract::geometry::extract_page_geometry(&precise, 1).unwrap();
+        assert_eq!(
+            page.glyphs
+                .iter()
+                .map(|g| g.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "A"]
+        );
+    }
+}
+
+#[test]
+fn decoder_form_falsy_values_do_not_select_defaults() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    let values = vec![
+        Object::Boolean(false),
+        Object::Integer(0),
+        Object::string_literal(""),
+        Object::Array(vec![]),
+    ];
+    for key in ["Resources", "Matrix"] {
+        for value in &values {
+            let mut document = PdfDocument::load(root.join("missing-matrix.pdf")).unwrap();
+            document
+                .get_object_mut((6, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set(key, value.clone());
+            let pdf = save_pdf(document);
+            let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
+            assert!(
+                pdf_extract::geometry::extract_page_geometry(&precise, 1).is_err(),
+                "{key}: {value:?}"
+            );
+        }
+    }
+    // A valid zero matrix is data, not an absent value selecting identity.
+    let mut document = PdfDocument::load(root.join("missing-matrix.pdf")).unwrap();
+    document
+        .get_object_mut((6, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set("Matrix", vec![Object::Integer(0); 6]);
+    let pdf = save_pdf(document);
+    let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
+    let page = pdf_extract::geometry::extract_page_geometry(&precise, 1).unwrap();
+    assert!(!page.glyphs.is_empty());
+    for glyph in page.glyphs {
+        assert_eq!(glyph.matrix, [0.; 6]);
+    }
+}
+
+#[test]
+fn decoder_shared_gs_dispatch_preserves_existing_validation() {
+    for enriched in [false, true] {
+        for valid in [true, false] {
+            let mut document = layout_pdf(vec![Operation::new("gs", vec!["State".into()])]);
+            let page = document.get_pages()[&1];
+            document.get_object_mut(page).unwrap().as_dict_mut().unwrap().set("Resources", dictionary! {
+                "ExtGState" => dictionary! {"State" => dictionary! {
+                    "Type" => if valid {"ExtGState"} else {"InvalidState"}, "SMask" => "None"
+                }}
+            });
+            let pdf = save_pdf(document);
+            let bytes = fs::read(&pdf.0).unwrap();
+            let doc = PdfDocument::load_mem_with_options(
+                &bytes,
+                pdf_extract::LoadOptions {
+                    numeric_precision: if enriched {
+                        pdf_extract::NumericPrecision::Precise
+                    } else {
+                        pdf_extract::NumericPrecision::Legacy
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            // ExtGState validation predates this repair; silently skipping gs changes it.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                output_doc_page(&doc, &mut LayoutEvents(Vec::new(), enriched), 1)
+            }));
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "gs dispatch: enriched={enriched} valid={valid}"
+            );
+            if let Ok(result) = result {
+                result.unwrap();
+            }
+        }
+    }
+}

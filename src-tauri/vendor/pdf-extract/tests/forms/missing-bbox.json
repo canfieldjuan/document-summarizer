@@ -1,0 +1,18 @@
+{
+  "alias": "missing-bbox",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "3bf05eac75df8791bf02f249d2740117273ecd96f184309773864343398430b3"
+}
