@@ -21,7 +21,7 @@ use tokio::pin;
 use crate::common_data_structures;
 use crate::encryption::{self, DecryptionError, EncryptionState, PasswordAlgorithm};
 use crate::error::{ParseError, XrefError};
-use crate::load_options::{FilterFunc, LoadOptions};
+use crate::load_options::{FilterFunc, LoadOptions, NumericPrecision};
 use crate::object_stream::ObjectStream;
 use crate::parser;
 use crate::xref::XrefEntry;
@@ -453,9 +453,14 @@ pub struct Reader<'a> {
 impl Document {
     /// Load from memory, using the empty password and reporting failures while loading encrypted objects.
     pub fn load_mem_checked_encryption(buffer: &[u8]) -> Result<Document> {
+        Self::load_mem_checked_encryption_with_precision(buffer, NumericPrecision::Legacy)
+    }
+
+    /// Load with checked empty-password decryption and the selected numeric precision.
+    pub fn load_mem_checked_encryption_with_precision(buffer: &[u8], precision: NumericPrecision) -> Result<Document> {
         Reader {
             buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: None,

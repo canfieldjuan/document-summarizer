@@ -266,9 +266,17 @@ fn encrypted_object_stream_materializes_referenced_pages() {
 #[test]
 fn encrypted_object_stream_with_invalid_compression_is_malformed() {
     let bytes = include_bytes!("../../tests/fixtures/issue133-aes-corrupt-object-stream.pdf");
-    let error = PdfDocument::load_mem_checked_encryption(bytes).unwrap_err();
-    eprintln!("corrupt object stream failure: {error:?}");
-    assert!(matches!(error, LopdfError::Decompress(_)));
+    for precision in [
+        lopdf::NumericPrecision::Legacy,
+        lopdf::NumericPrecision::Precise,
+    ] {
+        let error =
+            PdfDocument::load_mem_checked_encryption_with_precision(bytes, precision).unwrap_err();
+        assert!(
+            matches!(error, LopdfError::Decompress(_)),
+            "{precision:?}: {error:?}"
+        );
+    }
     let mut conn = db::init_db(":memory:").unwrap();
     assert_parse_refusal(&mut conn, bytes, "corrupt object stream", "MALFORMED_PDF");
 }
