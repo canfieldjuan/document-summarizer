@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::str::{self, FromStr};
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take, take_while, take_while1, take_while_m_n};
+use nom::bytes::complete::{tag, take, take_while, take_while_m_n, take_while1};
 use nom::character::complete::multispace1;
 use nom::character::complete::{digit0, digit1, one_of};
 use nom::character::complete::{space0, space1};
@@ -349,12 +349,29 @@ pub(crate) fn dict_dup(input: ParserInput) -> NomResult<Dictionary> {
     .parse(input)
 }
 
-fn stream<'a>(input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>) -> NomResult<'a, Object> {
+fn stream_data(input: ParserInput, length: usize) -> NomResult<ParserInput> {
+    terminated(take(length), pair(opt(eol), tag(&b"endstream"[..]))).parse(input)
+}
+
+pub(crate) fn checked_stream_data(buffer: &[u8], start: usize, length: usize) -> crate::Result<&[u8]> {
+    let input = buffer.get(start..).ok_or(Error::InvalidOffset(start))?;
+    let (_, data) = stream_data(input, length)
+        .map_err(|_| Error::InvalidStream("stream length does not match its data".to_string()))?;
+    Ok(data)
+}
+
+fn stream<'a>(
+    input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>, defer_stream_data: bool,
+) -> NomResult<'a, Object> {
     let (i, dict) = terminated(
         _dictionary(crate::reader::MAX_NESTING_DEPTH, reader.document.numeric_precision),
         (space, tag(&b"stream"[..]), space0, eol),
     )
     .parse(input)?;
+
+    if defer_stream_data {
+        return Ok((i, Object::Stream(Stream::with_position(dict, input.len() - i.len()))));
+    }
 
     if let Ok(length) = dict.get(b"Length").and_then(|value| {
         if let Ok(id) = value.as_reference() {
@@ -367,7 +384,7 @@ fn stream<'a>(input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSe
             // artificial error kind is created to allow descriptive nom errors
             return Err(nom::Err::Failure(NomError::from_error_kind(i, ErrorKind::LengthValue)));
         }
-        let (i, data) = terminated(take(length as usize), pair(opt(eol), tag(&b"endstream"[..]))).parse(i)?;
+        let (i, data) = stream_data(i, length as usize)?;
         Ok((i, Object::Stream(Stream::new(dict, data.to_vec()))))
     } else {
         // Return position relative to the start of the stream dictionary.
@@ -426,10 +443,12 @@ pub fn direct_object_with_precision(input: ParserInput, precision: NumericPrecis
     strip_nom(_direct_object(crate::reader::MAX_NESTING_DEPTH, precision)(input))
 }
 
-fn object<'a>(input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>) -> NomResult<'a, Object> {
+fn object<'a>(
+    input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>, defer_stream_data: bool,
+) -> NomResult<'a, Object> {
     terminated(
         alt((
-            |input| stream(input, reader, already_seen),
+            |input| stream(input, reader, already_seen, defer_stream_data),
             _direct_objects(crate::reader::MAX_NESTING_DEPTH, reader.document.numeric_precision),
         )),
         space,
@@ -439,9 +458,16 @@ fn object<'a>(input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSe
 
 pub fn indirect_object(
     input: ParserInput, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
-    already_seen: &mut HashSet<ObjectId>,
+    already_seen: &mut HashSet<ObjectId>, defer_stream_data: bool,
 ) -> crate::Result<(ObjectId, Object)> {
-    let (id, mut object) = _indirect_object(input.take_from(offset), offset, expected_id, reader, already_seen)?;
+    let (id, mut object) = _indirect_object(
+        input.take_from(offset),
+        offset,
+        expected_id,
+        reader,
+        already_seen,
+        defer_stream_data,
+    )?;
 
     offset_stream(&mut object, offset);
 
@@ -450,7 +476,7 @@ pub fn indirect_object(
 
 fn _indirect_object<'a>(
     input: ParserInput<'a>, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
-    already_seen: &mut HashSet<ObjectId>,
+    already_seen: &mut HashSet<ObjectId>, defer_stream_data: bool,
 ) -> crate::Result<(ObjectId, Object)> {
     let (i, (_, object_id)) = terminated((space, object_id), pair(tag(&b"obj"[..]), space))
         .parse(input)
@@ -463,7 +489,7 @@ fn _indirect_object<'a>(
 
     let object_offset = input.len() - i.len();
     let (_, mut object) = terminated(
-        |i: ParserInput<'a>| object(i, reader, already_seen),
+        |i: ParserInput<'a>| object(i, reader, already_seen, defer_stream_data),
         (space, opt(tag(&b"endobj"[..])), space),
     )
     .parse(i)
@@ -569,7 +595,7 @@ pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(X
     alt((
         xref_trailer,
         (|input| {
-            _indirect_object(input, 0, None, reader, &mut HashSet::new())
+            _indirect_object(input, 0, None, reader, &mut HashSet::new(), false)
                 .map(|(_, obj)| {
                     let res = match obj {
                         Object::Stream(stream) => decode_xref_stream(stream),

@@ -2,7 +2,7 @@ use super::DecryptionError;
 use super::rc4::Rc4;
 use crate::encodings;
 use crate::encryption::Permissions;
-use crate::{Document, Error, Object};
+use crate::{Dictionary, Document, Error, Object};
 use aes::cipher::{BlockDecryptMut as _, BlockEncryptMut as _, KeyInit as _, KeyIvInit as _};
 use md5::{Digest as _, Md5};
 use rand::RngExt as _;
@@ -45,6 +45,12 @@ impl TryFrom<&Document> for PasswordAlgorithm {
             .get_encrypted()
             .map_err(|_| DecryptionError::MissingEncryptDictionary)?;
 
+        Self::from_dictionary(encrypted)
+    }
+}
+
+impl PasswordAlgorithm {
+    pub(crate) fn from_dictionary(encrypted: &Dictionary) -> Result<Self, Error> {
         // Get the EncryptMetadata field.
         let encrypt_metadata = encrypted
             .get(b"EncryptMetadata")
@@ -377,7 +383,13 @@ impl PasswordAlgorithm {
     where
         P: AsRef<[u8]>,
     {
-        let mut password = password.as_ref();
+        self.compute_file_encryption_key_aes256(password.as_ref(), false)
+    }
+
+    fn compute_file_encryption_key_aes256(
+        &self, password: &[u8], check_permissions: bool,
+    ) -> Result<Vec<u8>, DecryptionError> {
+        let mut password = password;
 
         let hashed_owner_password = &self.owner_value[0..][..32];
         let owner_validation_salt = &self.owner_value[32..][..8];
@@ -417,6 +429,9 @@ impl PasswordAlgorithm {
                 decryptor.decrypt_block_mut(block.into());
             }
 
+            if check_permissions {
+                self.validate_permissions(&owner_encrypted, true)?;
+            }
             return Ok(owner_encrypted);
         }
 
@@ -454,7 +469,14 @@ impl PasswordAlgorithm {
             // value in the P key.
             //
             // i.e., use algorithm 13 to validate the permissions.
-            self.validate_permissions(&user_encrypted)?;
+            self.validate_permissions(&user_encrypted, check_permissions)
+                .map_err(|error| {
+                    if check_permissions {
+                        error
+                    } else {
+                        DecryptionError::IncorrectPassword
+                    }
+                })?;
 
             return Ok(user_encrypted);
         }
@@ -808,9 +830,13 @@ impl PasswordAlgorithm {
     where
         O: AsRef<[u8]>,
     {
+        let user_password = self.recover_user_password_r4(owner_password.as_ref())?;
+        self.authenticate_user_password_r4(doc, &user_password)
+    }
+
+    fn recover_user_password_r4(&self, password: &[u8]) -> Result<Vec<u8>, DecryptionError> {
         // Pad or truncate the owner string. If there is no owner password, use the user password
         // instead.
-        let password = owner_password.as_ref();
 
         // Pad or truncate the resulting password string to exactly 32 bytes. If the password string is
         // more than 32 bytes long, use only its first 32 bytes; if it is less than 32 bytes long, pad
@@ -882,10 +908,7 @@ impl PasswordAlgorithm {
         // encryption key.
         result = Rc4::new(&hash[..n]).decrypt(&result);
 
-        // The result of the previous step purports to be the user password. Authenticate this user
-        // password using Algorithm 5. If it is correct, the password supplied is the correct owner
-        // password.
-        self.authenticate_user_password_r4(doc, &result)
+        Ok(result)
     }
 
     /// Compute the encryption dictionary's U-entry value (revision 6).
@@ -1113,7 +1136,7 @@ impl PasswordAlgorithm {
     /// Validate the permissions (revision 6 and later).
     ///
     /// This implements Algorithm 13 as described in ISO 32000-2:2020 (PDF 2.0).
-    fn validate_permissions<K>(&self, file_encryption_key: K) -> Result<(), DecryptionError>
+    fn validate_permissions<K>(&self, file_encryption_key: K, check_all_bytes: bool) -> Result<(), DecryptionError>
     where
         K: AsRef<[u8]>,
     {
@@ -1135,19 +1158,20 @@ impl PasswordAlgorithm {
 
         // Verify that bytes 9-11 of the result are the characters "a", "d", "b".
         if &bytes[9..][..3] != b"adb" {
-            return Err(DecryptionError::IncorrectPassword);
+            return Err(DecryptionError::InvalidPermissions);
         }
 
         // Bytes 0-3 of the decrypted Perms entry, treated as a little-endian integer, are the
         // user permissions. They should match the value in the P key.
-        if bytes[..3] != u64::to_le_bytes(self.permissions.bits())[..3] {
-            return Err(DecryptionError::IncorrectPassword);
+        let length = if check_all_bytes { 4 } else { 3 };
+        if bytes[..length] != u64::to_le_bytes(self.permissions.bits())[..length] {
+            return Err(DecryptionError::InvalidPermissions);
         }
 
         // Byte 8 should match the ASCII character "T" or "F" according to the boolean value of the
         // EncryptMetadata key.
         if bytes[8] != if self.encrypt_metadata { b'T' } else { b'F' } {
-            return Err(DecryptionError::IncorrectPassword);
+            return Err(DecryptionError::InvalidPermissions);
         }
 
         Ok(())
@@ -1170,6 +1194,25 @@ impl PasswordAlgorithm {
         match self.revision {
             2..=4 => self.compute_file_encryption_key_r4(doc, password),
             5..=6 => self.compute_file_encryption_key_r6(password),
+            _ => Err(DecryptionError::UnsupportedRevision),
+        }
+    }
+
+    pub(crate) fn file_key_for_empty_password(&self, doc: &Document) -> Result<Vec<u8>, DecryptionError> {
+        match self.revision {
+            2..=4 => {
+                let empty = b"";
+                match self.authenticate_user_password_r4(doc, empty) {
+                    Ok(()) => self.compute_file_encryption_key_r4(doc, empty),
+                    Err(DecryptionError::IncorrectPassword) => {
+                        let recovered = self.recover_user_password_r4(empty)?;
+                        self.authenticate_user_password_r4(doc, &recovered)?;
+                        self.compute_file_encryption_key_r4(doc, &recovered)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            5..=6 => self.compute_file_encryption_key_aes256(b"", true),
             _ => Err(DecryptionError::UnsupportedRevision),
         }
     }
@@ -1416,7 +1459,7 @@ mod tests {
         assert!(algorithm.authenticate_user_password_r6(&owner_password).is_err());
 
         // Assert that the permissions validate correctly.
-        assert!(algorithm.validate_permissions(file_encryption_key).is_ok());
+        assert!(algorithm.validate_permissions(file_encryption_key, true).is_ok());
 
         // Assert that the file encryption key is equal for the owner password.
         let key = algorithm.compute_file_encryption_key_r6(&owner_password).unwrap();
@@ -1475,7 +1518,7 @@ mod tests {
         assert!(algorithm.authenticate_user_password_r6(&owner_password).is_err());
 
         // Assert that the permissions validate correctly.
-        assert!(algorithm.validate_permissions(file_encryption_key).is_ok());
+        assert!(algorithm.validate_permissions(file_encryption_key, true).is_ok());
 
         // Assert that the file encryption key is equal for the owner password.
         let key = algorithm.compute_file_encryption_key_r6(&owner_password).unwrap();

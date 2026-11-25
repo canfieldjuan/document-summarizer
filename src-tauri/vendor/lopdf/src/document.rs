@@ -581,6 +581,30 @@ impl Document {
         streams
     }
 
+    pub(crate) fn checked_page_contents(&self, page_id: ObjectId) -> Result<Vec<ObjectId>> {
+        let page = self.get_dictionary(page_id)?;
+        let Ok(contents) = page.get(b"Contents") else {
+            return Ok(Vec::new());
+        };
+        let (id, contents) = self.dereference(contents)?;
+        let stream_id = |id: Option<ObjectId>| {
+            id.ok_or_else(|| Error::InvalidStream("page content stream must be indirect".into()))
+        };
+        match contents {
+            Object::Null => Ok(Vec::new()),
+            Object::Stream(_) => Ok(vec![stream_id(id)?]),
+            Object::Array(contents) => contents
+                .iter()
+                .map(|entry| {
+                    let (id, stream) = self.dereference(entry)?;
+                    stream.as_stream()?;
+                    stream_id(id)
+                })
+                .collect(),
+            _ => Err(Error::InvalidStream("page Contents is not a stream or array".into())),
+        }
+    }
+
     /// Add content to a page. All existing content will be unchanged.
     pub fn add_page_contents(&mut self, page_id: ObjectId, content: Vec<u8>) -> Result<()> {
         let page = self.get_dictionary(page_id)?;

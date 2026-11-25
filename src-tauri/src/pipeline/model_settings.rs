@@ -1367,6 +1367,7 @@ fn stage_runtime(
                     expected_server_digest: server_digest.to_string(),
                     expected_runtime_libraries: profile.runtime_libraries,
                     context_tokens: snapshot.context_tokens,
+                    framing_policy: super::native_request::FramingPolicy::Legacy,
                 },
             )?))
         }

@@ -3,7 +3,7 @@ pub mod crypt_filters;
 mod pkcs5;
 mod rc4;
 
-use crate::{Dictionary, Document, Error, Object, ObjectId};
+use crate::{Dictionary, Document, Error, Object, ObjectId, Stream};
 use bitflags::bitflags;
 use crypt_filters::*;
 use std::collections::BTreeMap;
@@ -11,6 +11,17 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub use algorithms::PasswordAlgorithm;
+
+pub(crate) fn require_standard_handler(dictionary: &Dictionary) -> Result<(), Error> {
+    let filter = dictionary
+        .get(b"Filter")?
+        .as_name()
+        .map_err(|_| Error::DictKey("Filter".to_string()))?;
+    if filter != b"Standard" {
+        return Err(Error::UnsupportedSecurityHandler(filter.to_vec()));
+    }
+    Ok(())
+}
 
 #[derive(Error, Debug)]
 pub enum DecryptionError {
@@ -37,6 +48,8 @@ pub enum DecryptionError {
     InvalidCipherTextLength,
     #[error("invalid permission length")]
     InvalidPermissionLength,
+    #[error("invalid encrypted permissions")]
+    InvalidPermissions,
     #[error("invalid version")]
     InvalidVersion,
     #[error("invalid revision")]
@@ -538,19 +551,24 @@ impl EncryptionState {
         // the security handler that was used to encrypt the document.
         //
         // Standard shall be the name of the built-in password-based security handler.
-        let filter = document
+        let dictionary = document
             .get_encrypted()
-            .and_then(|dict| dict.get(b"Filter"))
-            .and_then(|object| object.as_name())
             .map_err(|_| Error::DictKey("Filter".to_string()))?;
-
-        if filter != b"Standard" {
-            return Err(Error::UnsupportedSecurityHandler(filter.to_vec()));
-        }
+        require_standard_handler(dictionary)?;
 
         let algorithm = PasswordAlgorithm::try_from(document)?;
         let file_encryption_key = algorithm.compute_file_encryption_key(document, password)?;
 
+        Ok(Self::from_file_key(document, algorithm, file_encryption_key))
+    }
+
+    pub(crate) fn decode_empty_password(document: &Document) -> Result<Self, Error> {
+        let algorithm = PasswordAlgorithm::try_from(document)?;
+        let file_encryption_key = algorithm.file_key_for_empty_password(document)?;
+        Ok(Self::from_file_key(document, algorithm, file_encryption_key))
+    }
+
+    fn from_file_key(document: &Document, algorithm: PasswordAlgorithm, file_encryption_key: Vec<u8>) -> Self {
         let mut crypt_filters = document.get_crypt_filters();
 
         // CF is meaningful only when the value of V is 4 (PDF 1.5) or 5 (PDF 2.0).
@@ -593,7 +611,7 @@ impl EncryptionState {
             }
         }
 
-        Ok(state)
+        state
     }
 
     pub fn encode(&self) -> Result<Dictionary, DecryptionError> {
@@ -657,6 +675,97 @@ impl EncryptionState {
             .cloned()
             .unwrap_or(Arc::new(Rc4CryptFilter))
     }
+
+    fn checked_named_filter(
+        &self, dictionary: &Dictionary, name: &[u8],
+    ) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        if name == b"Identity" {
+            return Ok(Arc::new(IdentityCryptFilter));
+        }
+        let filter = dictionary
+            .get(b"CF")
+            .and_then(Object::as_dict)
+            .and_then(|filters| filters.get(name))
+            .and_then(Object::as_dict)
+            .map_err(|_| DecryptionError::InvalidType)?;
+        if optional_name(filter, b"Type")?.is_some_and(|kind| kind != b"CryptFilter") {
+            return Err(DecryptionError::InvalidType);
+        }
+        match optional_name(filter, b"CFM")? {
+            None | Some(b"None") => Ok(Arc::new(IdentityCryptFilter)),
+            Some(_) => self
+                .crypt_filters
+                .get(name)
+                .cloned()
+                .ok_or(DecryptionError::UnsupportedEncryption),
+        }
+    }
+
+    fn checked_stream_filter(
+        &self, dictionary: &Dictionary, stream: &mut Stream,
+    ) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        if let Some(name) = take_stream_crypt_filter(stream)? {
+            return self.checked_named_filter(dictionary, &name);
+        }
+        let default = optional_name(dictionary, b"StmF")?.unwrap_or(b"Identity");
+        let name = if stream.dict.has_type(b"EmbeddedFile") {
+            optional_name(dictionary, b"EFF")?.unwrap_or(default)
+        } else {
+            default
+        };
+        self.checked_named_filter(dictionary, name)
+    }
+}
+
+fn optional_name<'a>(dictionary: &'a Dictionary, key: &[u8]) -> Result<Option<&'a [u8]>, DecryptionError> {
+    dictionary
+        .get(key)
+        .ok()
+        .map(|value| value.as_name().map_err(|_| DecryptionError::InvalidType))
+        .transpose()
+}
+
+fn take_stream_crypt_filter(stream: &mut Stream) -> Result<Option<Vec<u8>>, DecryptionError> {
+    if !stream.dict.has(b"Filter") {
+        return Ok(None);
+    }
+    let filters = stream.filters().map_err(|_| DecryptionError::InvalidType)?;
+    let Some(index) = filters.iter().position(|name| *name == b"Crypt") else {
+        return Ok(None);
+    };
+    if index != 0 || filters[1..].contains(&b"Crypt".as_slice()) {
+        return Err(DecryptionError::InvalidType);
+    }
+    let remaining: Vec<_> = filters[1..].iter().map(|name| Object::Name(name.to_vec())).collect();
+    let mut params = stream.dict.remove(b"DecodeParms");
+    let crypt_params = match &mut params {
+        Some(Object::Array(items)) if items.len() == remaining.len() + 1 => Some(items.remove(0)),
+        Some(Object::Array(_)) => return Err(DecryptionError::InvalidType),
+        _ => params.take(),
+    };
+    let name = match crypt_params {
+        None | Some(Object::Null) => b"Identity".to_vec(),
+        Some(Object::Dictionary(parameters)) => optional_name(&parameters, b"Name")?.unwrap_or(b"Identity").to_vec(),
+        _ => return Err(DecryptionError::InvalidType),
+    };
+    match remaining.as_slice() {
+        [] => {
+            stream.dict.remove(b"Filter");
+        }
+        [filter] => {
+            stream.dict.set("Filter", filter.clone());
+            if let Some(Object::Array(mut items)) = params {
+                stream.dict.set("DecodeParms", items.remove(0));
+            }
+        }
+        _ => {
+            stream.dict.set("Filter", remaining);
+            if let Some(params) = params {
+                stream.dict.set("DecodeParms", params);
+            }
+        }
+    }
+    Ok(Some(name))
 }
 
 /// Encrypts `obj`.
@@ -755,6 +864,31 @@ pub fn encrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Objec
 
 /// Decrypts `obj`.
 pub fn decrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Object) -> Result<(), DecryptionError> {
+    decrypt_object_internal(state, obj_id, obj, None)
+}
+
+pub(crate) fn decrypt_object_checked(
+    state: &EncryptionState, dictionary: &Dictionary, obj_id: ObjectId, obj: &mut Object,
+) -> Result<(), DecryptionError> {
+    decrypt_object_internal(state, obj_id, obj, Some(dictionary))
+}
+
+// Type is optional for a signature dictionary. In its absence, recognize
+// the direct ByteRange offset/length pairs. An explicit other type wins.
+fn is_signature_dictionary(dict: &Dictionary) -> bool {
+    match dict.get(b"Type") {
+        Ok(kind) => matches!(kind.as_name(), Ok(b"Sig" | b"DocTimeStamp")),
+        Err(_) => dict.get(b"ByteRange").and_then(Object::as_array).is_ok_and(|range| {
+            !range.is_empty()
+                && range.len() % 2 == 0
+                && range.iter().all(|part| matches!(part, Object::Integer(n) if *n >= 0))
+        }),
+    }
+}
+
+fn decrypt_object_internal(
+    state: &EncryptionState, obj_id: ObjectId, obj: &mut Object, checked_dictionary: Option<&Dictionary>,
+) -> Result<(), DecryptionError> {
     // The cross-reference stream shall not be encrypted and strings appearing in the
     // cross-reference stream dictionary shall not be encrypted.
     let is_xref_stream = obj
@@ -771,6 +905,8 @@ pub fn decrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Objec
         return Ok(());
     }
 
+    let checked_filters = checked_dictionary.filter(|_| state.version >= 4);
+
     // A stream filter type, the Crypt filter can be specified for any stream in the document to
     // override the default filter for streams. The stream's DecodeParms entry shall contain a
     // Crypt filter decode parameters dictionary whose Name entry specifies the particular crypt
@@ -778,6 +914,7 @@ pub fn decrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Objec
     let override_crypt_filter = obj
         .as_stream()
         .ok()
+        .filter(|_| checked_filters.is_none())
         .filter(|stream| {
             stream
                 .filters()
@@ -802,22 +939,45 @@ pub fn decrypt_object(state: &EncryptionState, obj_id: ObjectId, obj: &mut Objec
         // stored inside of those.
         Object::Array(objects) => {
             for obj in objects {
-                decrypt_object(state, obj_id, obj)?;
+                decrypt_object_internal(state, obj_id, obj, checked_dictionary)?;
             }
 
             return Ok(());
         }
         Object::Dictionary(objects) => {
-            for (_, obj) in objects.iter_mut() {
-                decrypt_object(state, obj_id, obj)?;
+            let signature = checked_dictionary.is_some() && is_signature_dictionary(objects);
+            for (key, obj) in objects.iter_mut() {
+                // The signature value is stored verbatim even in an encrypted PDF.
+                if signature && key == b"Contents" && matches!(obj, Object::String(..)) {
+                    continue;
+                }
+                decrypt_object_internal(state, obj_id, obj, checked_dictionary)?;
             }
 
             return Ok(());
         }
         // Encryption applies to all strings and streams in the document's PDF file. We return the
         // crypt filter and the content here.
-        Object::String(content, _) => (state.get_string_filter(), &*content),
-        Object::Stream(stream) => (state.get_stream_filter(), &stream.content),
+        Object::String(content, _) => {
+            let filter = match checked_filters {
+                Some(dictionary) => state
+                    .checked_named_filter(dictionary, optional_name(dictionary, b"StrF")?.unwrap_or(b"Identity"))?,
+                None => state.get_string_filter(),
+            };
+            (filter, &*content)
+        }
+        Object::Stream(stream) => {
+            if checked_dictionary.is_some() {
+                for (_, value) in stream.dict.iter_mut() {
+                    decrypt_object_internal(state, obj_id, value, checked_dictionary)?;
+                }
+            }
+            let filter = match checked_filters {
+                Some(dictionary) => state.checked_stream_filter(dictionary, stream)?,
+                None => state.get_stream_filter(),
+            };
+            (filter, &stream.content)
+        }
         // Encryption is not applied to other object types such as integers and boolean values.
         _ => {
             return Ok(());

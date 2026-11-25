@@ -123,6 +123,10 @@ pub enum Error {
 
 #[derive(Error, Debug)]
 pub enum DecompressError {
+    #[error("decoding Flate failed: {0}")]
+    Flate(#[source] std::io::Error),
+    #[error("decoding LZW failed: {0}")]
+    Lzw(#[source] std::io::Error),
     #[error("decoding ASCII85 failed: {0}")]
     Ascii85(&'static str),
 }

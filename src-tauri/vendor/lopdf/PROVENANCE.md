@@ -3,14 +3,17 @@
 Archive: lopdf 0.42.0, SHA256
 `25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c`.
 The included MIT LICENSE is retained verbatim. Upstream VCS metadata records
-`b68476c2a067f3b5158de60cd8ebce69f72068c8`, dirty=true; the archive checksum,
-not an assumed pristine VCS commit, identifies these sources. Package Cargo.lock
-and VCS metadata are excluded from this local dependency; the application lock
-is authoritative. Durable `lopdf-pristine-manifest.json` lists every archive file.
+`b68476c2a067f3b5158de60cd8ebce69f72068c8`, dirty=true. The archive checksum
+identifies these sources. This fork retains the archive VCS metadata. The
+application Cargo.lock pins the dependency graph. The archived
+`lopdf-pristine-manifest.json` lists every file from the crate.
 
 Local delta implements accepted r5: request-owned opt-in Real64 decimal parsing,
 recursive object/content propagation, explicit numeric access/serialization,
 and regression tests. Existing defaults and From<f64> retain Real(f32).
+[BACKPORT.md](BACKPORT.md) records the checked encryption changes to this
+same archive. Both object-stream loaders pass the document numeric mode to
+the shared parser after their respective decompression step.
 
 ## Formatting packaging policy
 

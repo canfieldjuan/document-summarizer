@@ -660,6 +660,49 @@ fn decoder_precision_serialization_preserves_negative_zero() {
 }
 
 #[test]
+fn checked_encrypted_object_stream_preserves_selected_precision() {
+    use lopdf::{xref::XrefEntry, NumericPrecision};
+
+    // An empty-password encrypted copy of precision_fixture(true), with the
+    // page's Probe dictionary stored inside an object stream.
+    let bytes = include_bytes!("../../tests/fixtures/issue154-checked-precision.pdf");
+    assert_eq!(
+        PdfDocument::load_mem_checked_encryption(bytes)
+            .unwrap()
+            .numeric_precision(),
+        NumericPrecision::Legacy
+    );
+    for (precision, expected) in [
+        (NumericPrecision::Legacy, 717.0),
+        (NumericPrecision::Precise, 716.99999),
+    ] {
+        let doc =
+            PdfDocument::load_mem_checked_encryption_with_precision(bytes, precision).unwrap();
+        assert!(doc.was_encrypted());
+        let page = doc.get_pages()[&1];
+        let probe = doc
+            .get_dictionary(page)
+            .unwrap()
+            .get(b"Probe")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        assert!(matches!(
+            doc.reference_table.entries.get(&probe.0),
+            Some(XrefEntry::Compressed { .. })
+        ));
+        let nested = doc
+            .get_dictionary(probe)
+            .unwrap()
+            .get(b"Nested")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(nested[0].as_float64().unwrap(), expected, "{precision:?}");
+    }
+}
+
+#[test]
 fn decoder_precision_survives_deferred_decryption_of_object_streams() {
     use lopdf::{
         EncryptionState, EncryptionVersion, LoadOptions, NumericPrecision, Object, Permissions,

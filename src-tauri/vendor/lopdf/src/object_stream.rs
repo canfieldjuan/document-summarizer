@@ -45,7 +45,15 @@ impl ObjectStream {
     /// Decode embedded objects using the owning document's numeric mode.
     pub fn new_with_precision(stream: &mut Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
         let _ = stream.decompress();
+        Self::parse(stream, precision)
+    }
 
+    pub(crate) fn new_checked(stream: &mut Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
+        stream.decompress_checked()?;
+        Self::parse(stream, precision)
+    }
+
+    fn parse(stream: &Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
         if stream.content.is_empty() {
             return Ok(ObjectStream {
                 objects: BTreeMap::new(),

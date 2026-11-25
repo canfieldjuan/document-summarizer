@@ -1,6 +1,6 @@
 use log::{error, warn};
 use std::cmp;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
 #[cfg(not(feature = "async"))]
 use std::fs::File;
@@ -19,9 +19,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::pin;
 
 use crate::common_data_structures;
-use crate::encryption::{self, EncryptionState};
+use crate::encryption::{self, DecryptionError, EncryptionState, PasswordAlgorithm};
 use crate::error::{ParseError, XrefError};
-use crate::load_options::{FilterFunc, LoadOptions};
+use crate::load_options::{FilterFunc, LoadOptions, NumericPrecision};
 use crate::object_stream::ObjectStream;
 use crate::parser;
 use crate::xref::XrefEntry;
@@ -450,6 +450,26 @@ pub struct Reader<'a> {
     pub strict: bool,                             // Reject non-conforming PDFs when true
 }
 
+impl Document {
+    /// Load from memory, using the empty password and reporting failures while loading encrypted objects.
+    pub fn load_mem_checked_encryption(buffer: &[u8]) -> Result<Document> {
+        Self::load_mem_checked_encryption_with_precision(buffer, NumericPrecision::Legacy)
+    }
+
+    /// Load with checked empty-password decryption and the selected numeric precision.
+    pub fn load_mem_checked_encryption_with_precision(buffer: &[u8], precision: NumericPrecision) -> Result<Document> {
+        Reader {
+            buffer,
+            document: Document::new_with_precision(precision),
+            encryption_state: None,
+            raw_objects: BTreeMap::new(),
+            password: None,
+            strict: false,
+        }
+        .read_internal(None, true)
+    }
+}
+
 /// Maximum allowed embedding of literal strings.
 pub const MAX_BRACKET: usize = 100;
 
@@ -736,7 +756,11 @@ impl Reader<'_> {
     }
 
     /// Read whole document.
-    pub fn read(mut self, filter_func: Option<FilterFunc>) -> Result<Document> {
+    pub fn read(self, filter_func: Option<FilterFunc>) -> Result<Document> {
+        self.read_internal(filter_func, false)
+    }
+
+    fn read_internal(mut self, filter_func: Option<FilterFunc>, check_encryption: bool) -> Result<Document> {
         let offset = self.buffer.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
         self.buffer = &self.buffer[offset..];
 
@@ -807,7 +831,9 @@ impl Reader<'_> {
         // Check if encrypted
         let is_encrypted = self.document.trailer.get(b"Encrypt").is_ok();
 
-        if is_encrypted {
+        if is_encrypted && check_encryption {
+            self.load_encrypted_document_checked()?;
+        } else if is_encrypted {
             // For encrypted PDFs, use a special loading strategy
             self.load_encrypted_document(filter_func)?;
         } else {
@@ -816,6 +842,115 @@ impl Reader<'_> {
         }
 
         Ok(self.document)
+    }
+
+    fn load_encrypted_document_checked(&mut self) -> Result<()> {
+        let (encrypt_id, dictionary) = match self.document.trailer.get(b"Encrypt")? {
+            Object::Reference(id) => {
+                let object = self.read_deferred_object(self.get_offset(*id)?, *id)?;
+                (Some(*id), object.as_dict()?.clone())
+            }
+            entry => (None, entry.as_dict()?.clone()),
+        };
+        encryption::require_standard_handler(&dictionary)?;
+        let Some(encrypt_id) = encrypt_id else {
+            PasswordAlgorithm::from_dictionary(&dictionary)?;
+            return Err(DecryptionError::UnsupportedEncryption.into());
+        };
+        self.document
+            .objects
+            .insert(encrypt_id, Object::Dictionary(dictionary.clone()));
+
+        let state = EncryptionState::decode_empty_password(&self.document)?;
+        let mut object_streams = BTreeMap::<u32, Vec<ObjectId>>::new();
+        for (&number, entry) in &self.document.reference_table.entries {
+            match *entry {
+                XrefEntry::Normal { offset, generation } => {
+                    let id = (number, generation);
+                    if id == encrypt_id {
+                        continue;
+                    }
+                    let mut object = self.read_deferred_object(offset, id)?;
+                    if !matches!(object, Object::Stream(_)) {
+                        encryption::decrypt_object_checked(&state, &dictionary, id, &mut object)?;
+                    }
+                    self.document.objects.insert(id, object);
+                }
+                XrefEntry::Compressed { container, .. } => {
+                    object_streams.entry(container).or_default().push((number, 0));
+                }
+                XrefEntry::Free | XrefEntry::UnusableFree => {}
+            }
+        }
+
+        // Object streams can contain the indirect lengths of other streams.
+        for (container, ids) in object_streams {
+            let id = (container, 0);
+            self.read_and_decrypt_stream(id, &state, &dictionary)?;
+            let precision = self.document.numeric_precision;
+            let stream = self.document.get_object_mut(id)?.as_stream_mut()?;
+            if !stream.dict.has_type(b"ObjStm") {
+                return Err(Error::InvalidObjectStream("xref points to a non-object stream".into()));
+            }
+            let mut objects = ObjectStream::new_checked(stream, precision)?.objects;
+            for id in ids {
+                let object = objects.remove(&id).ok_or(Error::ObjectNotFound(id))?;
+                self.document.objects.insert(id, object);
+            }
+        }
+
+        let unread_streams: Vec<_> = self
+            .document
+            .objects
+            .iter()
+            .filter_map(|(&id, object)| object.as_stream().ok()?.start_position.map(|_| id))
+            .collect();
+        for id in unread_streams {
+            self.read_and_decrypt_stream(id, &state, &dictionary)?;
+        }
+
+        // Extractors using get_page_content can recover from a decode error.
+        // Decode the required page streams here so the checked load preserves it.
+        let mut page_streams = BTreeSet::new();
+        for page in self.document.page_iter() {
+            page_streams.extend(self.document.checked_page_contents(page)?);
+        }
+        for id in page_streams {
+            self.document
+                .get_object_mut(id)?
+                .as_stream_mut()?
+                .decompress_checked()?;
+        }
+
+        self.document.objects.remove(&encrypt_id);
+        self.document.trailer.remove(b"Encrypt");
+        self.document.encryption_state = Some(state);
+        Ok(())
+    }
+
+    fn read_deferred_object(&self, offset: u32, id: ObjectId) -> Result<Object> {
+        let offset = offset as usize;
+        if offset >= self.buffer.len() {
+            return Err(Error::InvalidOffset(offset));
+        }
+        let (_, object) = parser::indirect_object(self.buffer, offset, Some(id), self, &mut HashSet::new(), true)?;
+        Ok(object)
+    }
+
+    fn read_and_decrypt_stream(
+        &mut self, id: ObjectId, state: &EncryptionState, dictionary: &Dictionary,
+    ) -> Result<()> {
+        let length = usize::try_from(self.get_stream_length(id)?)?;
+        let object = self.document.objects.get_mut(&id).ok_or(Error::ObjectNotFound(id))?;
+        let stream = object.as_stream_mut()?;
+        let start = stream
+            .start_position
+            .take()
+            .ok_or_else(|| Error::InvalidStream("missing start position".into()))?;
+        let data = parser::checked_stream_data(self.buffer, start, length)?;
+        stream.set_content(data.to_vec());
+        encryption::decrypt_object_checked(state, dictionary, id, object)?;
+        Ok(())
     }
 
     fn load_encrypted_document(&mut self, _filter_func: Option<FilterFunc>) -> Result<()> {
@@ -914,7 +1049,7 @@ impl Reader<'_> {
 
     fn parse_raw_object(&self, raw_bytes: &[u8]) -> Result<(ObjectId, Object)> {
         // Parse the raw bytes as an indirect object
-        parser::indirect_object(raw_bytes, 0, None, self, &mut HashSet::new())
+        parser::indirect_object(raw_bytes, 0, None, self, &mut HashSet::new(), false)
     }
 
     fn load_objects_raw(&mut self, filter_func: Option<FilterFunc>) -> Result<()> {
@@ -1257,7 +1392,7 @@ impl Reader<'_> {
         }
 
         // Just parse without decryption - we'll decrypt later
-        parser::indirect_object(self.buffer, offset, expected_id, self, already_seen)
+        parser::indirect_object(self.buffer, offset, expected_id, self, already_seen, false)
     }
 
     fn get_xref_start(buffer: &[u8]) -> Result<usize> {

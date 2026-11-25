@@ -12,7 +12,7 @@ use crate::pipeline::contracts::{
 use crate::pipeline::control::{CancellationToken, ExecutionControl, UNCONTROLLED_EXECUTION};
 use crate::pipeline::db::{self, NewOcrHandoff, OcrHandoff, OcrOutput, StoreError};
 use crate::pipeline::ingest::prepare_received_run;
-use crate::pipeline::parser::canonical_tagged_ocr_text;
+use crate::pipeline::parser::{canonical_tagged_ocr_text, open_native_pdf};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use reqwest::blocking::{multipart, Client, Response};
@@ -1046,8 +1046,8 @@ fn map_transport(error: TransportError) -> OcrConsumerError {
 }
 
 fn pdf_page_count(source: &[u8]) -> Result<usize, OcrConsumerError> {
-    let pdf = lopdf::Document::load_mem(source).map_err(|_| {
-        OcrConsumerError::InvalidOutput("the source is not a readable PDF".to_string())
+    let pdf = open_native_pdf(source).map_err(|error| {
+        OcrConsumerError::InvalidOutput(format!("the source is not a readable PDF: {}", error.code))
     })?;
     Ok(pdf.get_pages().len())
 }
@@ -1670,17 +1670,19 @@ mod tests {
     struct LostAckTransport {
         calls: Mutex<Vec<&'static str>>,
         completed: Mutex<Option<JobStatus>>,
+        submitted: Mutex<Option<(JobRequest, Vec<u8>)>>,
     }
 
     impl OcrTransport for LostAckTransport {
         fn submit(
             &self,
             _provider: &LiveOcrProvider,
-            _request: &JobRequest,
-            _source: &[u8],
+            request: &JobRequest,
+            source: &[u8],
             _deadline: Instant,
         ) -> Result<ReceivedStatus, TransportError> {
             self.calls.lock().unwrap().push("submit");
+            *self.submitted.lock().unwrap() = Some((request.clone(), source.to_vec()));
             Err(TransportError::Uncertain(
                 "lost acknowledgement".to_string(),
             ))
@@ -1828,6 +1830,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn mixed_pdf_reuses_existing_whole_document_ocr_lineage() {
+        for encrypted in [false, true] {
+            check_mixed_pdf_ocr_lineage(encrypted);
+        }
+    }
+
+    #[cfg(unix)]
+    fn check_mixed_pdf_ocr_lineage(encrypted: bool) {
         let mut pdf = Document::load_mem(&image_only_pdf()).unwrap();
         let first = *pdf.get_pages().values().next().unwrap();
         let font = pdf.add_object(dictionary! {
@@ -1843,6 +1852,9 @@ mod tests {
             "Resources",
             dictionary! { "Font" => dictionary! { "F1" => font } },
         );
+        if encrypted {
+            crate::pipeline::parser::test_pdf_encryption::encrypt_rc4(&mut pdf, "");
+        }
         let mut source = Vec::new();
         pdf.save_to(&mut source).unwrap();
         let directory = TempDir::new().unwrap();
@@ -1874,6 +1886,9 @@ mod tests {
             prepare_handoff(&mut conn, &root.run_id, directory.path(), &provider).unwrap();
         assert_eq!(handoff.source_bytes, source);
         assert_eq!(handoff.source_sha256, document.content_hash);
+        assert_eq!(handoff.source_byte_size, source.len() as u64);
+        assert_eq!(handoff.root_run_id, root.run_id);
+        assert_eq!(handoff.root_document_id, document.document_id);
         let transport = LostAckTransport::default();
         *transport.completed.lock().unwrap() = Some(completed_status(&handoff));
         let child = process_scanned_document_with(
@@ -1885,6 +1900,18 @@ mod tests {
             &UNCONTROLLED_EXECUTION,
         )
         .unwrap();
+        let submitted = transport.submitted.lock().unwrap();
+        let (request, bytes) = submitted
+            .as_ref()
+            .expect("transport should receive the source");
+        assert_eq!(bytes, &source);
+        assert_eq!(request.job_id, handoff.provider_job_id);
+        assert_eq!(request.inputs[0].artifact_id, handoff.source_artifact_id);
+        assert_eq!(request.inputs[0].sha256, sha256_hex(&source));
+        assert_eq!(request.inputs[0].byte_size, source.len() as u64);
+        assert_eq!(handoff.provider_instance_id, provider.instance_id);
+        assert_eq!(fs::read(&path).unwrap(), source);
+        drop(submitted);
         let root_state = db::get_pipeline_run(&conn, &root.run_id).unwrap().unwrap();
         assert_eq!(
             crate::pipeline::service::continuation_plan(
@@ -1937,6 +1964,107 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tagged_output_admission_rejects_encryption_and_wrong_paired_text() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("scan.pdf");
+        fs::write(&path, image_only_pdf()).unwrap();
+        let mut conn = db::init_db(":memory:").unwrap();
+        let (document, received) = prepare_pdf_ingestion(path.to_str().unwrap(), None).unwrap();
+        let root = db::persist_ingestion_with_profiles(
+            &mut conn,
+            &document,
+            &received,
+            Some(&snapshot()),
+            SummaryProfile::General,
+        )
+        .unwrap();
+        crate::pipeline::parser::parse_document(&mut conn, &PdfExtractParser::new(), &root.run_id)
+            .unwrap();
+        let handoff =
+            prepare_handoff(&mut conn, &root.run_id, directory.path(), &live_provider()).unwrap();
+        let status = completed_status(&handoff);
+        let valid = validate_completed_outputs(&handoff, &status).unwrap();
+        let mut encrypted = Document::load_mem(&valid.pdf_bytes).unwrap();
+        crate::pipeline::parser::test_pdf_encryption::encrypt_rc4(&mut encrypted, "");
+        let mut bytes = Vec::new();
+        encrypted.save_to(&mut bytes).unwrap();
+        for (index, bytes, diagnostic) in [
+            (
+                0,
+                bytes,
+                "Encrypted PDFs are not supported in the tagged OCR parser",
+            ),
+            (
+                1,
+                b"wrong first page\x0cwrong second page".to_vec(),
+                "OCR PDF canonical text does not match",
+            ),
+        ] {
+            let mut invalid = status.clone();
+            let output = &mut invalid.result.as_mut().unwrap().outputs[index];
+            output.sha256 = sha256_hex(&bytes);
+            output.byte_size = bytes.len() as u64;
+            output.payload_base64 = BASE64.encode(&bytes);
+            let result = validate_completed_outputs(&handoff, &invalid);
+            assert!(
+                matches!(result, Err(OcrConsumerError::InvalidOutput(message)) if message.contains(diagnostic))
+            );
+        }
+    }
+
+    #[test]
+    fn locked_and_corrupt_ocr_sources_are_refused_before_transport() {
+        let mut locked = Document::load_mem(&image_only_pdf()).unwrap();
+        crate::pipeline::parser::test_pdf_encryption::encrypt_rc4(&mut locked, "required");
+        let mut locked_bytes = Vec::new();
+        locked.save_to(&mut locked_bytes).unwrap();
+        let corrupt = include_bytes!("../../tests/fixtures/issue133-aes-corrupt.pdf");
+        let provider = live_provider();
+        for (source, code) in [
+            (corrupt.as_slice(), "MALFORMED_PDF"),
+            (locked_bytes.as_slice(), "PDF_PASSWORD_REQUIRED"),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("source.pdf");
+            fs::write(&path, source).unwrap();
+            let mut conn = db::init_db(":memory:").unwrap();
+            let (_, root) =
+                crate::pipeline::ingest::ingest_pdf(&mut conn, path.to_str().unwrap()).unwrap();
+            let parse_error = crate::pipeline::parser::parse_document(
+                &mut conn,
+                &PdfExtractParser::new(),
+                &root.run_id,
+            )
+            .unwrap_err();
+            assert_eq!(parse_error.code(), code);
+            let transport = LostAckTransport::default();
+            let refusal = process_scanned_document_with(
+                &mut conn,
+                &root.run_id,
+                directory.path(),
+                &provider,
+                &transport,
+                &UNCONTROLLED_EXECUTION,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(refusal, OcrConsumerError::InvalidOutput(message) if message == format!("the source is not a readable PDF: {code}"))
+            );
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert!(db::get_ocr_handoff_for_root(&conn, &root.run_id)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM ocr_lineage", [], |row| row
+                    .get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+        }
     }
 
     #[test]
