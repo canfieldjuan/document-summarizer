@@ -21,7 +21,7 @@ use tokio::pin;
 use crate::common_data_structures;
 use crate::encryption::{self, DecryptionError, EncryptionState, PasswordAlgorithm};
 use crate::error::{ParseError, XrefError};
-use crate::load_options::{FilterFunc, LoadOptions};
+use crate::load_options::{FilterFunc, LoadOptions, NumericPrecision};
 use crate::object_stream::ObjectStream;
 use crate::parser;
 use crate::xref::XrefEntry;
@@ -80,7 +80,7 @@ impl Document {
 
         Reader {
             buffer: &buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(options.numeric_precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: options.password,
@@ -98,7 +98,7 @@ impl Document {
     pub fn load_mem_with_options(buffer: &[u8], options: LoadOptions) -> Result<Document> {
         Reader {
             buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(options.numeric_precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: options.password,
@@ -220,7 +220,7 @@ impl Document {
 
         Reader {
             buffer: &buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(options.numeric_precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: options.password,
@@ -238,7 +238,7 @@ impl Document {
     pub fn load_mem_with_options(buffer: &[u8], options: LoadOptions) -> Result<Document> {
         Reader {
             buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(options.numeric_precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: options.password,
@@ -453,9 +453,14 @@ pub struct Reader<'a> {
 impl Document {
     /// Load from memory, using the empty password and reporting failures while loading encrypted objects.
     pub fn load_mem_checked_encryption(buffer: &[u8]) -> Result<Document> {
+        Self::load_mem_checked_encryption_with_precision(buffer, NumericPrecision::Legacy)
+    }
+
+    /// Load with checked empty-password decryption and the selected numeric precision.
+    pub fn load_mem_checked_encryption_with_precision(buffer: &[u8], precision: NumericPrecision) -> Result<Document> {
         Reader {
             buffer,
-            document: Document::new(),
+            document: Document::new_with_precision(precision),
             encryption_state: None,
             raw_objects: BTreeMap::new(),
             password: None,
@@ -882,11 +887,12 @@ impl Reader<'_> {
         for (container, ids) in object_streams {
             let id = (container, 0);
             self.read_and_decrypt_stream(id, &state, &dictionary)?;
+            let precision = self.document.numeric_precision;
             let stream = self.document.get_object_mut(id)?.as_stream_mut()?;
             if !stream.dict.has_type(b"ObjStm") {
                 return Err(Error::InvalidObjectStream("xref points to a non-object stream".into()));
             }
-            let mut objects = ObjectStream::new_checked(stream)?.objects;
+            let mut objects = ObjectStream::new_checked(stream, precision)?.objects;
             for id in ids {
                 let object = objects.remove(&id).ok_or(Error::ObjectNotFound(id))?;
                 self.document.objects.insert(id, object);
@@ -1015,7 +1021,7 @@ impl Reader<'_> {
             for (container_id, objects_in_stream) in streams_to_process {
                 if let Some(container_obj) = self.document.objects.get_mut(&(container_id, 0)) {
                     if let Ok(stream) = container_obj.as_stream_mut() {
-                        match ObjectStream::new(stream) {
+                        match ObjectStream::new_with_precision(stream, self.document.numeric_precision) {
                             Ok(object_stream) => {
                                 for (obj_num, _index) in objects_in_stream {
                                     let obj_id = (obj_num, 0);
@@ -1091,7 +1097,8 @@ impl Reader<'_> {
 
                 if let Ok(ref mut stream) = object.as_stream_mut() {
                     if stream.dict.has_type(b"ObjStm") && !is_encrypted {
-                        let obj_stream = ObjectStream::new(stream).ok()?;
+                        let obj_stream =
+                            ObjectStream::new_with_precision(stream, self.document.numeric_precision).ok()?;
                         let container_id = object_id.0;
                         let mut object_streams = object_streams.lock().unwrap();
                         if let Some(filter_func) = filter_func {
@@ -1221,7 +1228,7 @@ impl Reader<'_> {
         let mut already_seen = HashSet::new();
         let container_obj = self.get_object(container_id, &mut already_seen)?;
         let mut container_stream = container_obj.as_stream()?.clone();
-        let object_stream = ObjectStream::new(&mut container_stream)?;
+        let object_stream = ObjectStream::new_with_precision(&mut container_stream, self.document.numeric_precision)?;
         object_stream.objects.get(&id).cloned().ok_or(Error::MissingXrefEntry)
     }
 

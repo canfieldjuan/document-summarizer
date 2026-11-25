@@ -45,7 +45,7 @@ pub use encodings::{Encoding, encode_utf8, encode_utf16_be};
 pub use encryption::{EncryptionState, EncryptionVersion, Permissions};
 pub use error::{Error, Result};
 pub use incremental_document::IncrementalDocument;
-pub use load_options::{FilterFunc, LoadOptions};
+pub use load_options::{FilterFunc, LoadOptions, NumericPrecision};
 pub use object_stream::{ObjectStream, ObjectStreamBuilder, ObjectStreamConfig};
 pub use outlines::Outline;
 pub use reader::{PdfMetadata, Reader};

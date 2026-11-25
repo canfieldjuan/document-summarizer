@@ -347,13 +347,16 @@ pub enum XRefStreamFilter {
 
 impl Writer {
     fn need_separator(object: &Object) -> bool {
-        matches!(*object, Null | Boolean(_) | Integer(_) | Real(_) | Reference(_))
+        matches!(
+            *object,
+            Null | Boolean(_) | Integer(_) | Real(_) | Real64(_) | Reference(_)
+        )
     }
 
     fn need_end_separator(object: &Object) -> bool {
         matches!(
             *object,
-            Null | Boolean(_) | Integer(_) | Real(_) | Name(_) | Reference(_) | Object::Stream(_)
+            Null | Boolean(_) | Integer(_) | Real(_) | Real64(_) | Name(_) | Reference(_) | Object::Stream(_)
         )
     }
 
@@ -515,6 +518,21 @@ impl Writer {
                 file.write_all(buf.format(*value).as_bytes())
             }
             Real(value) => write!(file, "{value}"),
+            Real64(value) => {
+                if !value.is_finite() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "nonfinite PDF real",
+                    ));
+                }
+                // Keep integral reals (including -0.0) as decimal tokens.
+                let token = value.to_string();
+                file.write_all(token.as_bytes())?;
+                if !token.contains('.') {
+                    file.write_all(b".0")?;
+                }
+                Ok(())
+            }
             Name(name) => Writer::write_name(file, name),
             String(text, format) => Writer::write_string(file, text, format),
             Array(array) => Writer::write_array(file, array),

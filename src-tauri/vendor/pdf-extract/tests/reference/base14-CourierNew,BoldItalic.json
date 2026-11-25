@@ -1,0 +1,67 @@
+{
+  "alias": "base14-CourierNew,BoldItalic",
+  "pdf_sha256": "04a8dfcee3b81cb28c0cf50a455dfb237435bf87b89af02b1df1ad7433ce6f24",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Courier-BoldOblique",
+          "adv": 7.199999999999999,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 717.672,
+          "x1": 79.2,
+          "y1": 729.672,
+          "top": 62.327999999999975,
+          "bottom": 74.32799999999997,
+          "doctop": 62.327999999999975,
+          "width": 7.200000000000003,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            79.2,
+            720.0
+          ],
+          "fontname": "Courier-BoldOblique",
+          "adv": 7.199999999999999,
+          "upright": true,
+          "x0": 79.2,
+          "y0": 717.672,
+          "x1": 86.4,
+          "y1": 729.672,
+          "top": 62.327999999999975,
+          "bottom": 74.32799999999997,
+          "doctop": 62.327999999999975,
+          "width": 7.200000000000003,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

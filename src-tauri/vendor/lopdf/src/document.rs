@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// or just one (the last) incremental update in a PDF file.
 #[derive(Debug, Clone)]
 pub struct Document {
+    pub(crate) numeric_precision: crate::NumericPrecision,
     /// The version of the PDF specification to which the file conforms.
     pub version: String,
 
@@ -62,6 +63,7 @@ impl Document {
     /// Create new PDF document.
     pub fn new() -> Self {
         Self {
+            numeric_precision: crate::NumericPrecision::Legacy,
             version: "1.4".to_string(),
             binary_mark: vec![0xBB, 0xAD, 0xC0, 0xDE],
             trailer: Dictionary::new(),
@@ -82,6 +84,7 @@ impl Document {
         new_trailer.set("Prev", Object::Integer(prev.xref_start as i64));
         Self {
             version: "1.4".to_string(),
+            numeric_precision: prev.numeric_precision,
             binary_mark: vec![0xBB, 0xAD, 0xC0, 0xDE],
             trailer: new_trailer,
             reference_table: Xref::new(0, prev.reference_table.cross_reference_type),
@@ -93,6 +96,17 @@ impl Document {
             xref_start: 0,
             encryption_state: None,
         }
+    }
+
+    pub(crate) fn new_with_precision(precision: crate::NumericPrecision) -> Self {
+        let mut doc = Self::new();
+        doc.numeric_precision = precision;
+        doc
+    }
+
+    /// Representation selected at load time; retained for deferred object streams.
+    pub fn numeric_precision(&self) -> crate::NumericPrecision {
+        self.numeric_precision
     }
 
     const DEREF_LIMIT: usize = 128;
@@ -481,7 +495,7 @@ impl Document {
                 continue;
             }
 
-            let Some(obj_stream) = ObjectStream::new(stream).ok() else {
+            let Some(obj_stream) = ObjectStream::new_with_precision(stream, self.numeric_precision).ok() else {
                 continue;
             };
 

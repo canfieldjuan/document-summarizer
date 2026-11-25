@@ -39,16 +39,21 @@ impl Default for ObjectStreamConfig {
 impl ObjectStream {
     /// Parse an existing object stream
     pub fn new(stream: &mut Stream) -> Result<ObjectStream> {
+        Self::new_with_precision(stream, crate::NumericPrecision::Legacy)
+    }
+
+    /// Decode embedded objects using the owning document's numeric mode.
+    pub fn new_with_precision(stream: &mut Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
         let _ = stream.decompress();
-        Self::parse(stream)
+        Self::parse(stream, precision)
     }
 
-    pub(crate) fn new_checked(stream: &mut Stream) -> Result<ObjectStream> {
+    pub(crate) fn new_checked(stream: &mut Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
         stream.decompress_checked()?;
-        Self::parse(stream)
+        Self::parse(stream, precision)
     }
 
-    fn parse(stream: &Stream) -> Result<ObjectStream> {
+    fn parse(stream: &Stream, precision: crate::NumericPrecision) -> Result<ObjectStream> {
         if stream.content.is_empty() {
             return Ok(ObjectStream {
                 objects: BTreeMap::new(),
@@ -97,7 +102,7 @@ impl ObjectStream {
                 warn!("only whitespace after offset in object stream");
                 return None;
             }
-            let object = parser::direct_object(&stream.content[start..])?;
+            let object = parser::direct_object_with_precision(&stream.content[start..], precision)?;
 
             Some(((id, 0), object))
         };
