@@ -231,7 +231,8 @@ impl SharedRequestEncoder {
         .map(Self)
     }
 
-    /// Serialize the app's projected decoder schema directly, retaining its field order.
+    /// Serialize the projected schema, whose `serde_json::Value` sorts object keys.
+    /// A writer that requires declaration order must pass its typed schema directly to `encode`.
     pub fn completion_bytes(
         &self,
         request: &ModelRequest,
