@@ -1,6 +1,7 @@
 //! Native Qwen framing and wire representation shared by native transports.
 //! No process, credentials, socket, HTTP client or lifecycle owner lives here.
 use super::contracts::{ModelRequest, ModelRuntimeFailure, ModelTokenUsage};
+use super::model::response_format;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -11,9 +12,7 @@ pub(super) const MAX_TOKENIZE_RESPONSE_BYTES: u64 = 512 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FramingPolicy {
     Legacy,
-    // The later admitted-profile adapter is the only intended production constructor.
-    // This prerequisite deliberately exposes no free-form qualified constructor.
-    #[allow(dead_code)]
+    // The fixed shared encoder uses this internally. Route admission owns transport access.
     Qualified(QualifiedFraming),
 }
 
@@ -24,7 +23,7 @@ pub(crate) struct QualifiedFraming {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by synthetic parity tests until admitted-profile binding lands.
+#[allow(dead_code)] // Open thinking remains covered by the historical qualified fixtures.
 enum ThinkingPolicy {
     Enabled,
     Disabled,
@@ -171,19 +170,120 @@ impl PromptFraming {
         prompt: &'a [u32],
         schema: Option<serde_json::Value>,
     ) -> CompletionRequest<'a> {
+        self.wire_request(
+            prompt,
+            request.max_output_tokens,
+            request.seed,
+            schema,
+            CompletionRoute::Standalone,
+        )
+    }
+
+    fn wire_request<'a, S>(
+        &self,
+        prompt: &'a [u32],
+        n_predict: u32,
+        seed: u64,
+        json_schema: Option<S>,
+        route: CompletionRoute,
+    ) -> CompletionRequest<'a, S> {
         CompletionRequest {
             prompt,
-            n_predict: request.max_output_tokens,
+            n_predict,
             temperature: 0.0,
-            seed: request.seed,
+            seed,
             stop: [Self::MESSAGE_END],
-            cache_prompt: true,
+            cache_prompt: matches!(route, CompletionRoute::Standalone),
             message_delimiters: match self.policy {
                 FramingPolicy::Legacy => None,
                 FramingPolicy::Qualified(_) => Some(&Self::MESSAGE_DELIMITERS),
             },
-            json_schema: schema,
+            json_schema,
         }
+    }
+}
+
+enum CompletionRoute {
+    Standalone,
+    Shared,
+}
+
+// Same bytes as runtime/v1/profile.json at connect-contracts c35f607 and the
+// host's vendor/connect-contracts/profile.json at 73a0758. Used for framing identity.
+pub(super) const SHARED_PROFILE: &[u8] =
+    include_bytes!("../../vendor/connect-contracts/profile.json");
+
+/// Builds V1 shared completion bytes before handing them to the admitted transport.
+pub struct SharedRequestEncoder(PromptFraming);
+
+impl SharedRequestEncoder {
+    /// Tokenize the control fragments once using the shared profile's closed thinking frame.
+    pub fn load(
+        tokenize_control: impl FnMut(&str, bool) -> Result<Vec<u32>, ModelRuntimeFailure>,
+    ) -> Result<Self, ModelRuntimeFailure> {
+        PromptFraming::load(
+            FramingPolicy::Qualified(QualifiedFraming {
+                profile_identity: Sha256::digest(SHARED_PROFILE).into(),
+                thinking: ThinkingPolicy::Disabled,
+            }),
+            tokenize_control,
+        )
+        .map(Self)
+    }
+
+    /// Serialize the app's projected decoder schema directly, retaining its field order.
+    pub fn completion_bytes(
+        &self,
+        request: &ModelRequest,
+        tokenize: impl FnMut(&str, bool) -> Result<Vec<u32>, ModelRuntimeFailure>,
+    ) -> Result<Vec<u8>, ModelRuntimeFailure> {
+        self.encode(
+            &request.system_prompt,
+            &request.user_prompt,
+            request.max_output_tokens,
+            request.seed,
+            response_format(&request.output_format)?,
+            tokenize,
+        )
+    }
+
+    /// Build DS-HOST-CANARY-1 with its own fixed inputs and no answer-forcing schema.
+    pub fn canary_bytes(
+        &self,
+        tokenize: impl FnMut(&str, bool) -> Result<Vec<u32>, ModelRuntimeFailure>,
+    ) -> Result<Vec<u8>, ModelRuntimeFailure> {
+        self.encode(
+            "Answer only from the supplied record. Return exactly the requested marker, with no explanation, added punctuation, or surrounding whitespace.",
+            "Record:\nThe approved route uses marker CEDAR-17.\nThe rejected route uses marker MAPLE-42.\n\nQuestion: What marker does the approved route use?",
+            1500,
+            u64::from(u32::MAX),
+            None::<()>,
+            tokenize,
+        )
+    }
+
+    fn encode<S: Serialize>(
+        &self,
+        system: &str,
+        user: &str,
+        n_predict: u32,
+        seed: u64,
+        schema: Option<S>,
+        mut tokenize: impl FnMut(&str, bool) -> Result<Vec<u32>, ModelRuntimeFailure>,
+    ) -> Result<Vec<u8>, ModelRuntimeFailure> {
+        let prompt = self
+            .0
+            .compose(tokenize(system, false)?, tokenize(user, false)?)?;
+        let request =
+            self.0
+                .wire_request(&prompt, n_predict, seed, schema, CompletionRoute::Shared);
+        serde_json::to_vec(&request).map_err(|_| {
+            failure(
+                "MODEL_REQUEST_INVALID",
+                "Cannot encode shared completion",
+                false,
+            )
+        })
     }
 }
 
@@ -324,7 +424,7 @@ pub(super) struct TokenizeResponse {
 }
 
 #[derive(Serialize)]
-pub(super) struct CompletionRequest<'a> {
+pub(super) struct CompletionRequest<'a, S = serde_json::Value> {
     prompt: &'a [u32],
     n_predict: u32,
     temperature: f32,
@@ -334,7 +434,7 @@ pub(super) struct CompletionRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     message_delimiters: Option<&'static [MessageDelimiter]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    json_schema: Option<serde_json::Value>,
+    json_schema: Option<S>,
 }
 
 #[derive(Deserialize)]

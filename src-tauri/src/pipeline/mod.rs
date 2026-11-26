@@ -11,6 +11,7 @@ pub mod llama_cpp;
 pub mod model;
 pub mod model_settings;
 pub(crate) mod native_request;
+pub use native_request::SharedRequestEncoder;
 pub mod normalize;
 pub mod parser;
 pub mod profile_suggestion;
