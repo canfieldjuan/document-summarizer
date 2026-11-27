@@ -818,6 +818,35 @@ fn decoder_form_dispatch_key_semantics() {
 }
 
 #[test]
+fn decoder_form_font_selection_rejects_surplus_operand() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/pdf-extract/tests/forms");
+    let mut document = PdfDocument::load(root.join("missing-matrix.pdf")).unwrap();
+    let form = document
+        .get_object_mut((6, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap();
+    let mut content = Content::decode(&form.content).unwrap();
+    let select_font = content
+        .operations
+        .iter_mut()
+        .find(|op| op.operator == "Tf")
+        .unwrap();
+    select_font.operands.push(Object::Integer(0));
+    form.set_content(content.encode().unwrap());
+
+    let pdf = save_pdf(document);
+    let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
+    let result = pdf_extract::geometry::extract_page_geometry(&precise, 1);
+    assert!(
+        matches!(result, Err(pdf_extract::OutputError::IoError(ref error))
+        if error.kind() == std::io::ErrorKind::InvalidData
+            && error.to_string() == "Tf requires name and size"),
+        "expected a font operand-count error, got {result:?}"
+    );
+}
+
+#[test]
 fn decoder_form_malformed_invocations_return_errors() {
     check_form_errors(false);
 }
@@ -933,21 +962,29 @@ fn decoder_form_falsy_values_do_not_select_defaults() {
             );
         }
     }
-    // A valid zero matrix is data, not an absent value selecting identity.
-    let mut document = PdfDocument::load(root.join("missing-matrix.pdf")).unwrap();
-    document
-        .get_object_mut((6, 0))
-        .unwrap()
-        .as_stream_mut()
-        .unwrap()
-        .dict
-        .set("Matrix", vec![Object::Integer(0); 6]);
-    let pdf = save_pdf(document);
-    let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
-    let page = pdf_extract::geometry::extract_page_geometry(&precise, 1).unwrap();
-    assert!(!page.glyphs.is_empty());
-    for glyph in page.glyphs {
-        assert_eq!(glyph.matrix, [0.; 6]);
+    // A valid zero matrix is data, including when its numbers are indirect.
+    for indirect in [false, true] {
+        let mut document = PdfDocument::load(root.join("missing-matrix.pdf")).unwrap();
+        let zero = Object::Integer(0);
+        let element = if indirect {
+            Object::Reference(document.add_object(zero))
+        } else {
+            zero
+        };
+        document
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matrix", vec![element; 6]);
+        let pdf = save_pdf(document);
+        let precise = pdf_extract::geometry::PreciseDocument::load(&pdf.0).unwrap();
+        let page = pdf_extract::geometry::extract_page_geometry(&precise, 1).unwrap();
+        assert!(!page.glyphs.is_empty());
+        for glyph in page.glyphs {
+            assert_eq!(glyph.matrix, [0.; 6]);
+        }
     }
 }
 
