@@ -1,0 +1,18 @@
+{
+  "alias": "empty-content",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "185df574390243d7b7cc02666ea4265ccee1add14b66c1cbce6a8bbf6b881a58"
+}

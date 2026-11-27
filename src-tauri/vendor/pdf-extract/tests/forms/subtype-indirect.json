@@ -1,0 +1,18 @@
+{
+  "alias": "subtype-indirect",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "53e581b41d2f2ddf9f20327eaba3666b154701f219599dd9137e720453a91204"
+}

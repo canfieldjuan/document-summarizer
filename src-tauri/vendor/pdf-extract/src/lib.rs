@@ -1582,6 +1582,115 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
     }
 }
 
+// One stream invocation owns its state. Geometry Forms suspend their caller on
+// an explicit stack; legacy extraction retains its historical recursive path.
+struct InvocationFrame<'a> {
+    operations: std::vec::IntoIter<lopdf::content::Operation>,
+    resources: &'a Dictionary,
+    gs: GraphicsState<'a>,
+    gs_stack: Vec<GraphicsState<'a>>,
+    mc_stack: Vec<lopdf::content::Operation>,
+    tlm: Transform,
+    path: Path,
+    id: Option<ObjectId>,
+}
+
+impl<'a> InvocationFrame<'a> {
+    fn new(content: Content<Vec<lopdf::content::Operation>>, resources: &'a Dictionary,
+           ctm: Transform, id: Option<ObjectId>) -> Self {
+        let gs = GraphicsState {
+            ts: TextState {
+                font: None,
+                font_size: std::f64::NAN,
+                character_spacing: 0.,
+                word_spacing: 0.,
+                horizontal_scaling: 100. / 100.,
+                leading: 0.,
+                rise: 0.,
+                tm: Transform2D::identity(),
+                geometry_position: (0., 0.),
+            },
+            fill_color: Vec::new(),
+            fill_colorspace: ColorSpace::DeviceGray,
+            stroke_color: Vec::new(),
+            stroke_colorspace: ColorSpace::DeviceGray,
+            line_width: 1.,
+            ctm,
+            smask: None
+        };
+        Self { operations: content.operations.into_iter(), resources, gs,
+            gs_stack: Vec::new(), mc_stack: Vec::new(), tlm: Transform::identity(),
+            path: Path::new(), id }
+    }
+}
+
+fn invocation_error(message: &str) -> OutputError {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
+}
+
+fn invocation_dictionary<'a>(doc: &'a Document, object: &'a Object) -> Result<&'a Dictionary, OutputError> {
+    Ok(doc.dereference(object)?.1.as_dict()?)
+}
+
+// PDF null dictionary entries are absent in the pinned reference parser.
+// Keep this raw: resolving a reference first changes Subtype/Resources semantics.
+fn invocation_entry<'a>(dict: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
+    match dict.get(key) {
+        Err(_) | Ok(Object::Null) => None,
+        Ok(object) => Some(object),
+    }
+}
+
+fn invocation_numbers<const N: usize>(doc: &Document, object: &Object, label: &str)
+    -> Result<[f64; N], OutputError> {
+    let values = doc.dereference(object)?.1.as_array()
+        .map_err(|_| invocation_error(&format!("{label} requires {N} numbers")))?;
+    if values.len() != N {
+        return Err(invocation_error(&format!("{label} requires {N} numbers")));
+    }
+    let mut numbers = [0.; N];
+    for (i, value) in values.iter().enumerate() {
+        numbers[i] = doc.dereference(value)?.1.as_float64()?;
+        if !numbers[i].is_finite() {
+            return Err(invocation_error(&format!("nonfinite {label}")));
+        }
+    }
+    Ok(numbers)
+}
+
+fn geometry_form_frame<'a>(doc: &'a Document, resources: &'a Dictionary,
+    caller_ctm: Transform, operation: &lopdf::content::Operation) -> Result<Option<InvocationFrame<'a>>, OutputError> {
+    if operation.operands.len() != 1 {
+        return Err(invocation_error("Do requires exactly one XObject name"));
+    }
+    let name = operation.operands[0].as_name()?;
+    let objects = invocation_dictionary(doc, resources.get(b"XObject")?)?;
+    let (id, object) = doc.dereference(objects.get(name)?)?;
+    let xf = object.as_stream()?;
+    // Subtype dispatch precedes content decoding: pixels cannot be text operators.
+    if !matches!(invocation_entry(&xf.dict, b"Subtype"), Some(Object::Name(name)) if name == b"Form") {
+        return Ok(None);
+    }
+    let Some(bbox) = invocation_entry(&xf.dict, b"BBox") else { return Ok(None); };
+    invocation_numbers::<4>(doc, bbox, "Form BBox")?;
+    let id = id.ok_or_else(|| invocation_error("Form has no resolved stream identity"))?;
+    let matrix = match invocation_entry(&xf.dict, b"Matrix") {
+        Some(object) => {
+            let numbers = invocation_numbers::<6>(doc, object, "Form Matrix")?;
+            Transform::row_major(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5])
+        },
+        None => Transform::identity(),
+    };
+    // An indirect empty dictionary owns empty resources; a direct empty one falls back.
+    let resources = match invocation_entry(&xf.dict, b"Resources") {
+        None => resources,
+        Some(Object::Dictionary(dict)) if dict.is_empty() => resources,
+        Some(object) => invocation_dictionary(doc, object)?,
+    };
+    let content = Content::decode_with_precision(&get_contents(xf), doc.numeric_precision())?;
+    Ok(Some(InvocationFrame::new(content, resources, caller_ctm.pre_transform(&matrix), Some(id))))
+}
+
 struct Processor<'a> {
     initial_ctm: Transform,
     font_table: HashMap<Vec<u8>, Rc<dyn PdfFont + 'a>>,
@@ -1603,47 +1712,27 @@ impl<'a> Processor<'a> {
         } else {
             Content::decode(&content).unwrap()
         };
-        let mut gs: GraphicsState = GraphicsState {
-            ts: TextState {
-                font: None,
-                font_size: std::f64::NAN,
-                character_spacing: 0.,
-                word_spacing: 0.,
-                horizontal_scaling: 100. / 100.,
-                leading: 0.,
-                rise: 0.,
-                tm: Transform2D::identity(),
-                geometry_position: (0., 0.),
-            },
-            fill_color: Vec::new(),
-            fill_colorspace: ColorSpace::DeviceGray,
-            stroke_color: Vec::new(),
-            stroke_colorspace: ColorSpace::DeviceGray,
-            line_width: 1.,
-            ctm: self.initial_ctm,
-            smask: None
-        };
-        //let mut ts = &mut gs.ts;
-        let mut gs_stack = Vec::new();
-        let mut mc_stack = Vec::new();
-        // XXX: replace tlm with a point for text start
-        let mut tlm = Transform2D::identity();
-        let mut path = Path::new();
+        let mut frame = InvocationFrame::new(content, resources, self.initial_ctm, None);
+        let mut parents = Vec::new();
+        let mut active_forms = std::collections::HashSet::new();
         let flip_ctm = Transform2D::row_major(1., 0., 0., -1., 0., media_box.ury - media_box.lly);
         dlog!("MediaBox {:?}", media_box);
-        for operation in &content.operations {
-            //dlog!("op: {:?}", operation);
-
+        loop {
+            let Some(operation) = frame.operations.next() else {
+                if let Some(id) = frame.id { active_forms.remove(&id); }
+                if let Some(parent) = parents.pop() { frame = parent; continue; }
+                break;
+            };
             match operation.operator.as_ref() {
                 "BT" => {
-                    tlm = Transform2D::identity();
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
+                    frame.tlm = Transform2D::identity();
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
                 }
                 "ET" => {
-                    tlm = Transform2D::identity();
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
+                    frame.tlm = Transform2D::identity();
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
                 }
                 "cm" => {
                     assert!(operation.operands.len() == 6);
@@ -1653,25 +1742,25 @@ impl<'a> Processor<'a> {
                                                    as_num(&operation.operands[3]),
                                                    as_num(&operation.operands[4]),
                                                    as_num(&operation.operands[5]));
-                    gs.ctm = gs.ctm.pre_transform(&m);
-                    dlog!("matrix {:?}", gs.ctm);
+                    frame.gs.ctm = frame.gs.ctm.pre_transform(&m);
+                    dlog!("matrix {:?}", frame.gs.ctm);
                 }
                 "CS" => {
                     let name = operation.operands[0].as_name().unwrap();
-                    gs.stroke_colorspace = make_colorspace(doc, name, resources);
+                    frame.gs.stroke_colorspace = make_colorspace(doc, name, frame.resources);
                 }
                 "cs" => {
                     let name = operation.operands[0].as_name().unwrap();
-                    gs.fill_colorspace = make_colorspace(doc, name, resources);
+                    frame.gs.fill_colorspace = make_colorspace(doc, name, frame.resources);
                 }
                 "SC" | "SCN" => {
-                    gs.stroke_color = match gs.stroke_colorspace {
+                    frame.gs.stroke_color = match frame.gs.stroke_colorspace {
                         ColorSpace::Pattern => { dlog!("unhandled pattern color"); Vec::new() }
                         _ => { operation.operands.iter().map(|x| as_num(x)).collect() }
                     };
                 }
                 "sc" | "scn" => {
-                    gs.fill_color = match gs.fill_colorspace {
+                    frame.gs.fill_color = match frame.gs.fill_colorspace {
                         ColorSpace::Pattern => { dlog!("unhandled pattern color"); Vec::new() }
                         _ => { operation.operands.iter().map(|x| as_num(x)).collect() }
                     };
@@ -1685,14 +1774,14 @@ impl<'a> Processor<'a> {
                             for e in array {
                                 match e {
                                     &Object::String(ref s, _) => {
-                                        show_text(&mut gs, s, &tlm, &flip_ctm, output)?;
+                                        show_text(&mut frame.gs, s, &frame.tlm, &flip_ctm, output)?;
                                     }
                                     &Object::Integer(i) => {
                                         if output.wants_geometry() {
-                                            geometry::adjust_text(&mut gs.ts, i as f64)?;
+                                            geometry::adjust_text(&mut frame.gs.ts, i as f64)?;
                                             continue;
                                         }
-                                        let ts = &mut gs.ts;
+                                        let ts = &mut frame.gs.ts;
                                         let w0 = 0.;
                                         let tj = i as f64;
                                         let ty = 0.;
@@ -1701,14 +1790,14 @@ impl<'a> Processor<'a> {
                                         dlog!("adjust text by: {} {:?}", i, ts.tm);
                                     }
                                     &Object::Real64(i) => {
-                                        geometry::adjust_text(&mut gs.ts, i)?;
+                                        geometry::adjust_text(&mut frame.gs.ts, i)?;
                                     }
                                     &Object::Real(i) => {
                                         if output.wants_geometry() {
-                                            geometry::adjust_text(&mut gs.ts, i as f64)?;
+                                            geometry::adjust_text(&mut frame.gs.ts, i as f64)?;
                                             continue;
                                         }
-                                        let ts = &mut gs.ts;
+                                        let ts = &mut frame.gs.ts;
                                         let w0 = 0.;
                                         let tj = i as f64;
                                         let ty = 0.;
@@ -1726,29 +1815,33 @@ impl<'a> Processor<'a> {
                 "Tj" => {
                     match operation.operands[0] {
                         Object::String(ref s, _) => {
-                            show_text(&mut gs, s, &tlm, &flip_ctm, output)?;
+                            show_text(&mut frame.gs, s, &frame.tlm, &flip_ctm, output)?;
                         }
                         _ => { panic!("unexpected Tj operand {:?}", operation) }
                     }
                 }
                 "Tc" => {
-                    gs.ts.character_spacing = as_num(&operation.operands[0]);
+                    frame.gs.ts.character_spacing = as_num(&operation.operands[0]);
                 }
                 "Tw" => {
-                    gs.ts.word_spacing = as_num(&operation.operands[0]);
+                    frame.gs.ts.word_spacing = as_num(&operation.operands[0]);
                 }
                 "Tz" => {
-                    gs.ts.horizontal_scaling = as_num(&operation.operands[0]) / 100.;
+                    frame.gs.ts.horizontal_scaling = as_num(&operation.operands[0]) / 100.;
                 }
                 "TL" => {
-                    gs.ts.leading = as_num(&operation.operands[0]);
+                    frame.gs.ts.leading = as_num(&operation.operands[0]);
                 }
                 "Tf" => {
-                    let fonts: &Dictionary = get(&doc, resources, b"Font");
-                    let name = operation.operands[0].as_name().unwrap();
                     let font = if output.wants_geometry() {
-                        geometry::ReferenceFont::new(doc, get::<&Dictionary>(doc, fonts, name))?
+                        if operation.operands.len() != 2 { return Err(invocation_error("Tf requires name and size")); }
+                        let name = operation.operands[0].as_name()?;
+                        let fonts = invocation_dictionary(doc, frame.resources.get(b"Font")?)?;
+                        let dictionary = invocation_dictionary(doc, fonts.get(name)?)?;
+                        geometry::ReferenceFont::new(doc, dictionary)?
                     } else {
+                        let fonts: &Dictionary = get(doc, frame.resources, b"Font");
+                        let name = operation.operands[0].as_name().unwrap();
                         self.font_table.entry(name.to_owned()).or_insert_with(|| make_font(doc, get::<&Dictionary>(doc, fonts, name))).clone()
                     };
                     {
@@ -1760,25 +1853,25 @@ impl<'a> Processor<'a> {
                         //dlog!("font file: {:?}", f);
                     }*/
                     }
-                    gs.ts.font = Some(font);
+                    frame.gs.ts.font = Some(font);
 
-                    gs.ts.font_size = as_num(&operation.operands[1]);
-                    dlog!("font {} size: {} {:?}", pdf_to_utf8(name), gs.ts.font_size, operation);
+                    frame.gs.ts.font_size = as_num(&operation.operands[1]);
+                    dlog!("font {} size: {} {:?}", pdf_to_utf8(operation.operands[0].as_name().unwrap()), frame.gs.ts.font_size, operation);
                 }
                 "Ts" => {
-                    gs.ts.rise = as_num(&operation.operands[0]);
+                    frame.gs.ts.rise = as_num(&operation.operands[0]);
                 }
                 "Tm" => {
                     assert!(operation.operands.len() == 6);
-                    tlm = Transform2D::row_major(as_num(&operation.operands[0]),
+                    frame.tlm = Transform2D::row_major(as_num(&operation.operands[0]),
                                                  as_num(&operation.operands[1]),
                                                  as_num(&operation.operands[2]),
                                                  as_num(&operation.operands[3]),
                                                  as_num(&operation.operands[4]),
                                                  as_num(&operation.operands[5]));
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
-                    dlog!("Tm: matrix {:?}", gs.ts.tm);
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
+                    dlog!("Tm: matrix {:?}", frame.gs.ts.tm);
                     output.end_line()?;
                 }
                 "Td" => {
@@ -1791,10 +1884,10 @@ impl<'a> Processor<'a> {
                     let ty = as_num(&operation.operands[1]);
                     dlog!("translation: {} {}", tx, ty);
 
-                    tlm = tlm.pre_transform(&Transform2D::create_translation(tx, ty));
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
-                    dlog!("Td matrix {:?}", gs.ts.tm);
+                    frame.tlm = frame.tlm.pre_transform(&Transform2D::create_translation(tx, ty));
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
+                    dlog!("Td matrix {:?}", frame.gs.ts.tm);
                     output.end_line()?;
                 }
 
@@ -1806,47 +1899,47 @@ impl<'a> Processor<'a> {
                     let tx = as_num(&operation.operands[0]);
                     let ty = as_num(&operation.operands[1]);
                     dlog!("translation: {} {}", tx, ty);
-                    gs.ts.leading = -ty;
+                    frame.gs.ts.leading = -ty;
 
-                    tlm = tlm.pre_transform(&Transform2D::create_translation(tx, ty));
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
-                    dlog!("TD matrix {:?}", gs.ts.tm);
+                    frame.tlm = frame.tlm.pre_transform(&Transform2D::create_translation(tx, ty));
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
+                    dlog!("TD matrix {:?}", frame.gs.ts.tm);
                     output.end_line()?;
                 }
 
                 "T*" => {
                     let tx = 0.0;
-                    let ty = -gs.ts.leading;
+                    let ty = -frame.gs.ts.leading;
 
-                    tlm = tlm.pre_transform(&Transform2D::create_translation(tx, ty));
-                    gs.ts.tm = tlm;
-                    gs.ts.geometry_position = (0., 0.);
-                    dlog!("T* matrix {:?}", gs.ts.tm);
+                    frame.tlm = frame.tlm.pre_transform(&Transform2D::create_translation(tx, ty));
+                    frame.gs.ts.tm = frame.tlm;
+                    frame.gs.ts.geometry_position = (0., 0.);
+                    dlog!("T* matrix {:?}", frame.gs.ts.tm);
                     output.end_line()?;
                 }
-                "q" => { gs_stack.push(gs.clone()); }
+                "q" => { frame.gs_stack.push(frame.gs.clone()); }
                 "Q" => {
-                    let s = gs_stack.pop();
+                    let s = frame.gs_stack.pop();
                     if let Some(s) = s {
-                        gs = s;
+                        frame.gs = s;
                     } else {
                         warn!("No state to pop");
                     }
                 }
                 "gs" => {
-                    let ext_gstate: &Dictionary = get(doc, resources, b"ExtGState");
+                    let ext_gstate: &Dictionary = get(doc, frame.resources, b"ExtGState");
                     let name = operation.operands[0].as_name().unwrap();
                     let state: &Dictionary = get(doc, ext_gstate, name);
-                    apply_state(doc, &mut gs, state);
+                    apply_state(doc, &mut frame.gs, state);
                 }
                 "i" => { dlog!("unhandled graphics state flattness operator {:?}", operation); }
-                "w" => { gs.line_width = as_num(&operation.operands[0]); }
+                "w" => { frame.gs.line_width = as_num(&operation.operands[0]); }
                 "J" | "j" | "M" | "d" | "ri"  => { dlog!("unknown graphics state operator {:?}", operation); }
-                "m" => { path.ops.push(PathOp::MoveTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
-                "l" => { path.ops.push(PathOp::LineTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
+                "m" => { frame.path.ops.push(PathOp::MoveTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
+                "l" => { frame.path.ops.push(PathOp::LineTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
                 "c" => {
-                    path.ops.push(PathOp::CurveTo(
+                    frame.path.ops.push(PathOp::CurveTo(
                         as_num(&operation.operands[0]),
                         as_num(&operation.operands[1]),
                         as_num(&operation.operands[2]),
@@ -1855,8 +1948,8 @@ impl<'a> Processor<'a> {
                         as_num(&operation.operands[5])))
                 }
                 "v" => {
-                    let (x, y) = path.current_point();
-                    path.ops.push(PathOp::CurveTo(
+                    let (x, y) = frame.path.current_point();
+                    frame.path.ops.push(PathOp::CurveTo(
                         x,
                         y,
                         as_num(&operation.operands[0]),
@@ -1865,7 +1958,7 @@ impl<'a> Processor<'a> {
                         as_num(&operation.operands[3])))
                 }
                 "y" => {
-                    path.ops.push(PathOp::CurveTo(
+                    frame.path.ops.push(PathOp::CurveTo(
                         as_num(&operation.operands[0]),
                         as_num(&operation.operands[1]),
                         as_num(&operation.operands[2]),
@@ -1873,9 +1966,9 @@ impl<'a> Processor<'a> {
                         as_num(&operation.operands[2]),
                         as_num(&operation.operands[3])))
                 }
-                "h" => { path.ops.push(PathOp::Close) }
+                "h" => { frame.path.ops.push(PathOp::Close) }
                 "re" => {
-                    path.ops.push(PathOp::Rect(as_num(&operation.operands[0]),
+                    frame.path.ops.push(PathOp::Rect(as_num(&operation.operands[0]),
                                                as_num(&operation.operands[1]),
                                                as_num(&operation.operands[2]),
                                                as_num(&operation.operands[3])))
@@ -1884,33 +1977,41 @@ impl<'a> Processor<'a> {
                     dlog!("unhandled path op {:?}", operation);
                 }
                 "S" => {
-                    output.stroke(&gs.ctm, &gs.stroke_colorspace, &gs.stroke_color, &path)?;
-                    path.ops.clear();
+                    output.stroke(&frame.gs.ctm, &frame.gs.stroke_colorspace, &frame.gs.stroke_color, &frame.path)?;
+                    frame.path.ops.clear();
                 }
                 "F" | "f" => {
-                    output.fill(&gs.ctm, &gs.fill_colorspace, &gs.fill_color, &path)?;
-                    path.ops.clear();
+                    output.fill(&frame.gs.ctm, &frame.gs.fill_colorspace, &frame.gs.fill_color, &frame.path)?;
+                    frame.path.ops.clear();
                 }
                 "W" | "w*" => { dlog!("unhandled clipping operation {:?}", operation); }
                 "n" => {
-                    dlog!("discard {:?}", path);
-                    path.ops.clear();
+                    dlog!("discard {:?}", frame.path);
+                    frame.path.ops.clear();
                 }
                 "BMC" | "BDC" => {
-                    mc_stack.push(operation);
+                    frame.mc_stack.push(operation);
                 }
                 "EMC" => {
-                    mc_stack.pop();
+                    frame.mc_stack.pop();
                 }
                 "Do" => {
-                    // `Do` process an entire subdocument, so we do a recursive call to `process_stream`
-                    // with the subdocument content and resources
-                    let xobject: &Dictionary = get(&doc, resources, b"XObject");
-                    let name = operation.operands[0].as_name().unwrap();
-                    let xf: &Stream = get(&doc, xobject, name);
-                    let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
-                    let contents = get_contents(xf);
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num)?;
+                    if output.wants_geometry() {
+                        if let Some(child) = geometry_form_frame(doc, frame.resources, frame.gs.ctm, &operation)? {
+                            let id = child.id.expect("resolved Form frame identity");
+                            if !active_forms.insert(id) {
+                                return Err(invocation_error("cyclic Form invocation"));
+                            }
+                            parents.push(std::mem::replace(&mut frame, child));
+                        }
+                    } else {
+                        let xobject: &Dictionary = get(doc, frame.resources, b"XObject");
+                        let name = operation.operands[0].as_name().unwrap();
+                        let xf: &Stream = get(doc, xobject, name);
+                        let resources = maybe_get_obj(doc, &xf.dict, b"Resources")
+                            .and_then(|n| n.as_dict().ok()).unwrap_or(frame.resources);
+                        self.process_stream(doc, get_contents(xf), resources, media_box, output, page_num)?;
+                    }
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
