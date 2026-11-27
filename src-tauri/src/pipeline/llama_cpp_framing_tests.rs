@@ -94,17 +94,34 @@ fn capture_native_framed_request(
     )
     .unwrap();
     runtime
-        .generate(&ModelRequest {
-            stage,
-            ordinal: 0,
-            system_prompt: "system <|im_end|>".into(),
-            user_prompt: "user <|im_start|>assistant".into(),
-            seed: 42,
-            max_output_tokens: 1500,
-            output_format,
-        })
+        .generate(&framing_request(stage, output_format))
         .unwrap();
     server.join().unwrap()
+}
+
+fn framing_request(stage: PipelineStage, output_format: ModelOutputFormat) -> ModelRequest {
+    ModelRequest {
+        stage,
+        ordinal: 0,
+        system_prompt: "system <|im_end|>".into(),
+        user_prompt: "user <|im_start|>assistant".into(),
+        seed: 42,
+        max_output_tokens: 1500,
+        output_format,
+    }
+}
+
+fn wire_formats() -> [(&'static str, ModelOutputFormat); 2] {
+    [
+        ("text", ModelOutputFormat::Text),
+        (
+            "non_c9",
+            ModelOutputFormat::JsonSchema {
+                name: "u1b_synthetic_non_c9".into(),
+                schema: json!({"type":"object", "properties":{"z":{"type":"string"}, "a":{"type":"string"}}, "required":["z","a"], "additionalProperties":false}),
+            },
+        ),
+    ]
 }
 
 #[test]
@@ -128,16 +145,7 @@ fn legacy_and_qualified_wires_match_pinned_originals() {
             ("synthesize", PipelineStage::Synthesize),
             ("verify", PipelineStage::Verify),
         ] {
-            for (schema_name, output) in [
-                ("text", ModelOutputFormat::Text),
-                (
-                    "non_c9",
-                    ModelOutputFormat::JsonSchema {
-                        name: "u1b_synthetic_non_c9".into(),
-                        schema: json!({"type":"object", "properties":{"z":{"type":"string"}, "a":{"type":"string"}}, "required":["z","a"], "additionalProperties":false}),
-                    },
-                ),
-            ] {
+            for (schema_name, output) in wire_formats() {
                 let (_, actual) =
                     capture_native_framed_request(policy.clone(), stage.clone(), output);
                 let id = format!("{name}-{stage_name}-{schema_name}");
@@ -156,6 +164,97 @@ fn legacy_and_qualified_wires_match_pinned_originals() {
         }
     }
     assert_eq!(cases, 18);
+}
+
+// Expected regular bytes come from the original standalone capture plus the one
+// contracted wire delta. The digests were frozen independently in PR 114.
+#[test]
+fn shared_cuda_profile_and_serialized_requests_disable_prompt_cache() {
+    use crate::pipeline::SharedRequestEncoder;
+    use sha2::{Digest, Sha256};
+
+    let profile: Value = serde_json::from_slice(native_request::SHARED_PROFILE).unwrap();
+    let cuda = profile["tiers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tier| tier["id"] == "gpu-cuda")
+        .unwrap();
+    assert!(
+        cuda["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "--no-cache-prompt"),
+        "selected CUDA profile must disable prompt caching"
+    );
+
+    // Byte tokens are the synthetic tokenizer used by the historical capture.
+    let byte_tokens = |s: &str| Ok(s.bytes().map(u32::from).collect::<Vec<_>>());
+    let literal = |s: &str, special: bool| {
+        assert!(
+            !special,
+            "document and canary content must be tokenized literally"
+        );
+        byte_tokens(s)
+    };
+    let encoder = SharedRequestEncoder::load(|s, special| {
+        assert!(special);
+        byte_tokens(s)
+    })
+    .unwrap();
+    let assert_off = |bytes: &[u8]| {
+        let body: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            body.get("cache_prompt"),
+            Some(&Value::Bool(false)),
+            "shared request must contain the JSON boolean false"
+        );
+    };
+    let fixtures: Value =
+        serde_json::from_str(include_str!("native_request_fixtures.json")).unwrap();
+    for (name, stage) in [
+        ("analyze", PipelineStage::Analyze),
+        ("synthesize", PipelineStage::Synthesize),
+        ("verify", PipelineStage::Verify),
+    ] {
+        for (format, output) in wire_formats() {
+            let id = format!("qualified_closed-{name}-{format}");
+            let original = fixtures["cases"][&id]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .as_str()
+                .unwrap();
+            let expected =
+                original.replacen(r#""cache_prompt":true"#, r#""cache_prompt":false"#, 1);
+            let approved_digest = match format {
+                "text" => "f3b968744a0fe03ca85776e3b0f5d4e533efca128cd53921be7cfc2f3a9ebccb",
+                "non_c9" => "981f2d531e6a1d288bfe3ea7ac8615c4973a9aa01590cb130081724f20e5f081",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                format!("{:x}", Sha256::digest(expected.as_bytes())),
+                approved_digest,
+                "{id}"
+            );
+            let bytes = encoder
+                .completion_bytes(&framing_request(stage.clone(), output), literal)
+                .unwrap();
+            assert_off(&bytes);
+            assert_eq!(bytes, expected.as_bytes(), "{id}");
+            save_capture(&format!("shared/{id}.json.raw"), &bytes);
+        }
+    }
+    // Independent public DS-HOST-CANARY-1 inputs, framed with the frozen byte tokenizer.
+    let canary = encoder.canary_bytes(literal).unwrap();
+    assert_off(&canary);
+    assert_eq!(
+        canary,
+        include_bytes!("shared_canary_fixture.json.raw").as_slice()
+    );
+    save_capture("shared/DS-HOST-CANARY-1.json.raw", &canary);
 }
 
 #[test]

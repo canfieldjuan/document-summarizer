@@ -1,0 +1,508 @@
+{
+  "profile_version": 1,
+  "llama_cpp_commit": "c1d0e7a004015f23bc0233470b747b596f29b264",
+  "context_tokens": 32768,
+  "tiers": [
+    {
+      "id": "gpu-cuda",
+      "device_class": "nvidia-cuda",
+      "requirements": {
+        "memory_floor_mib": 7373,
+        "cuda_compute_capabilities": [
+          "5.0",
+          "5.2",
+          "6.0",
+          "6.1",
+          "7.0",
+          "7.5",
+          "8.0",
+          "8.6",
+          "8.9",
+          "9.0",
+          "10.0",
+          "12.0"
+        ],
+        "min_driver_cuda_version": "12.8"
+      },
+      "model": {
+        "file_name": "Qwen3.5-9B-Q4_K_M.gguf",
+        "size_bytes": 5627044256,
+        "sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+        "url": "https://huggingface.co/Canfield/Qwen3.5-9B-Q4_K_M-GGUF/resolve/77f9a8018038bf8cdc87d817a4f7d1684db72c47/Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "runtime": {
+        "archive": {
+          "file_name": "llama-c1d0e7a-cuda12.8.1-exclusive-linux-x64.tar.gz",
+          "size_bytes": 191805675,
+          "sha256": "2d4988729ab0df576efdaa58be27c55b4de1eb574256049a0f2b6d5abe9bff10",
+          "url": "https://huggingface.co/Canfield/llama.cpp-c1d0e7a-cuda12.8.1-linux-x64/resolve/61ff10f15cb9274a362b9e7cdf01383288be8c6f/llama-c1d0e7a-cuda12.8.1-exclusive-linux-x64.tar.gz"
+        },
+        "server_path": "llama-c1d0e7a-cuda12.8.1-linux-x64/llama-server",
+        "files": [
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/BUILD-INFO.txt",
+            "sha256": "9236282d5c02393e00364d8d4607a0fc0e36bf3194b8ddb4426d6713d351fd1c"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/MANIFEST.txt",
+            "sha256": "0ea6e5bfc0afc98a692c9763aa5422d120fcd5593ee14a6889b2a4db1ef78808"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcublas.so.12",
+            "sha256": "031ce6c2cbfbb9468f040527cab5c599069ce5609e73e28f87503881063eac21"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcublasLt.so.12",
+            "sha256": "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcudart.so.12",
+            "sha256": "c3a75b33af334a3486d197dbd1584a2985183ba4688d237a2be5f2f679329920"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-base.so.0.22.0",
+            "sha256": "767330d3a01a10fd93b1ac16e460a135e152d46651e0c77ecd6ff26b09670c01"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-alderlake.so",
+            "sha256": "cd58efeeb77489e4024be89523e748068c15f5274a88f9dcd935750f8a0536b5"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-cannonlake.so",
+            "sha256": "af3aeb4037e766a542e13e8541fba9b346759b40d3657cf580400a8dd9ecdccd"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-cascadelake.so",
+            "sha256": "f69ef2f811585bf5b7670fe1f764b8b2bc204a62308f7b91e3d3c5b20e421c4b"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-cooperlake.so",
+            "sha256": "57c2995cc013b136a81795b4cfa12fdb31c11b31b2e612e53ce064a463e10614"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-haswell.so",
+            "sha256": "6e41dea2512a09074f66fffa8edd94e0f9a0ae4246ccaf7ea9285633a1569cdf"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-icelake.so",
+            "sha256": "1d4ea85319ea89eff58e567c0156da0089949fb52c5d2dcc62a0ab60ed2ea703"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-ivybridge.so",
+            "sha256": "884deafc676a670a24e6c6d00f953f8dc00b75418be0fc1570422fea4b929ec7"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-piledriver.so",
+            "sha256": "4d3517d555c5a58ae866f8789537ee459c9104f4bacb254e7a1149e886a5bdee"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-sandybridge.so",
+            "sha256": "82689084ceb35ee7d4ca3e967a59213df49b0c545eecffc62ebaf94523ce8062"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-sapphirerapids.so",
+            "sha256": "efdebc1074422b7bcf3b1e10b834697cabcd68de2146e1156f89ebc5d2ce4089"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-skylakex.so",
+            "sha256": "2de1bde4631fd37f80f5b8ddfc83e8e1f76a7531f17a65e5d5c392b27e9d998b"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-sse42.so",
+            "sha256": "c1cf9f4aa2d92ce5ab3aa8def69b28248601728c56cfd169b4e69191f0b2a203"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-x64.so",
+            "sha256": "3d263ba61d45ff76212b1c6cc3c4fff905121225e7bc635ff570c166504dd2fd"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cpu-zen4.so",
+            "sha256": "36670f290e7a57e0260e75a25258c24dadb76e2cc81b96f64a0abf9559df7e4b"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml-cuda.so",
+            "sha256": "b4dbcdd86314c8748139c34e627cde17039f4f691b25ceac34d84f8402ed24c4"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libggml.so.0.22.0",
+            "sha256": "d0895304483d65cccdb2459af27d020cf2307f0287214df05332172e5d4cb2e0"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libllama-common.so.0.3.0",
+            "sha256": "afe3e81781015aef9a702854cd88b53294c49efe04a2643769f8e86df7cdfbdd"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libllama-server-impl.so",
+            "sha256": "26395ca22349916aee6bff1df26d794f7044b060392a4bbdef7a05fbdb7fcfcb"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libllama.so.0.3.0",
+            "sha256": "660e0850d5513437b7b4dd25378efe7795a3d3908c53f844abb658ac4da2cdeb"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libmtmd.so.0.3.0",
+            "sha256": "2cbb405d9eaba1ffee19ed32e7ad129209623cc9118849fc47195b093e06b5d7"
+          },
+          {
+            "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/llama-server",
+            "sha256": "1852aa28caf075e0c4aef0a2d3500960ea38f5dc620cd6740aeebaed552119dd"
+          }
+        ],
+        "libraries": [
+          {
+            "archive": {
+              "file_name": "cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz",
+              "size_bytes": 1354240,
+              "sha256": "8d566b5fe745c46842dc16945cf36686227536decd2302c372be86da37faca68",
+              "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.90-archive.tar.xz"
+            },
+            "members": [
+              {
+                "archive_path": "cuda_cudart-linux-x86_64-12.8.90-archive/lib/libcudart.so.12.8.90",
+                "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcudart.so.12"
+              }
+            ]
+          },
+          {
+            "archive": {
+              "file_name": "libcublas-linux-x86_64-12.8.4.1-archive.tar.xz",
+              "size_bytes": 938651324,
+              "sha256": "21718957c2cf000bacd69d36c95708a2319199e39e056f8b4f0f68e3b9f323bb",
+              "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-x86_64/libcublas-linux-x86_64-12.8.4.1-archive.tar.xz"
+            },
+            "members": [
+              {
+                "archive_path": "libcublas-linux-x86_64-12.8.4.1-archive/lib/libcublas.so.12.8.4.1",
+                "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcublas.so.12"
+              },
+              {
+                "archive_path": "libcublas-linux-x86_64-12.8.4.1-archive/lib/libcublasLt.so.12.8.4.1",
+                "path": "llama-c1d0e7a-cuda12.8.1-linux-x64/libcublasLt.so.12"
+              }
+            ]
+          }
+        ]
+      },
+      "argv": [
+        "-m",
+        "<model>",
+        "--device",
+        "<device>",
+        "-c",
+        "32768",
+        "-np",
+        "1",
+        "-ngl",
+        "999",
+        "-fa",
+        "on",
+        "--jinja",
+        "--chat-template-kwargs",
+        "{\"enable_thinking\":false}",
+        "--reasoning",
+        "off",
+        "--alias",
+        "<GGUF sha256>",
+        "--api-key-file",
+        "<key>",
+        "--offline",
+        "--no-webui",
+        "--no-warmup",
+        "--host",
+        "<socket>",
+        "-b",
+        "2048",
+        "-ub",
+        "512",
+        "--ctx-checkpoints",
+        "32",
+        "--checkpoint-min-step",
+        "8192",
+        "--cache-ram",
+        "8192",
+        "--cache-reuse",
+        "0",
+        "--no-cache-prompt"
+      ]
+    },
+    {
+      "id": "gpu-vulkan",
+      "device_class": "vulkan-discrete",
+      "requirements": {
+        "memory_floor_mib": 7373
+      },
+      "model": {
+        "file_name": "Qwen3.5-9B-Q4_K_M.gguf",
+        "size_bytes": 5627044256,
+        "sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+        "url": "https://huggingface.co/Canfield/Qwen3.5-9B-Q4_K_M-GGUF/resolve/77f9a8018038bf8cdc87d817a4f7d1684db72c47/Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+      "runtime": {
+        "archive": {
+          "file_name": "llama-c1d0e7a-vulkan-exclusive-linux-x64.tar.gz",
+          "size_bytes": 32527089,
+          "sha256": "8107cf195262b54d39f2a51957cb00c6cb45a28f319e2d4020cf0b1bdd6bd690",
+          "url": "https://huggingface.co/Canfield/llama.cpp-c1d0e7a-vulkan-exclusive-linux-x64/resolve/795c058176b606431454bd95ff58ae1e57413366/llama-c1d0e7a-vulkan-exclusive-linux-x64.tar.gz"
+        },
+        "server_path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-server",
+        "files": [
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/BUILD-INFO.txt",
+            "sha256": "6f125f022dc3894fb81a5d16a802ad7491f902d4937f8ec4d3f424733f669cc8"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/LICENSE",
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/MANIFEST.txt",
+            "sha256": "3e1ffb429ee5a7fe444ff7d6f5b13673b5feb816e0f089c34a5182d021da0ded"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/ggml-rpc-server",
+            "sha256": "71aee55927792db0693aa23e6bfcb1c753e8792b17f511a12bb1bda60a9a7a48"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-base.so.0.22.0",
+            "sha256": "ebbcda9795124309a9fa492e3a7be49dbbc6b8fd7d95cde1524838f88057fcc3"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-alderlake.so",
+            "sha256": "f1e420c6069bb3d6f310069bb3164b8a2e3895227183dc095f2d521f5d54a7e7"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-cannonlake.so",
+            "sha256": "d7c129e27327bdbe7fe5884aa60e4a5dec9eddbf5adadd3d72f73905ab5f17ab"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-cascadelake.so",
+            "sha256": "4e2ee9f47758426548403f75c6031baa3fc1b6c3c5d209354d947b9cf35c8c20"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-cooperlake.so",
+            "sha256": "c706d1d1ba8804deb457f0cde14fb1cffa3f7a8e465bac0169a2c957a3f3fb4f"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-haswell.so",
+            "sha256": "f8620357aea4dce39ccc3326626573a71c783f5dd11e49f52addb21006adbc67"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-icelake.so",
+            "sha256": "ef2ec9d39c701e5ab9062fe5aad49d55d0a4c63b1e0eb46fbbfb5d437b6b56b8"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-ivybridge.so",
+            "sha256": "547c9295f247cb2ba4947af75a04a5279f40479af85eadc4876282a681c3c6fd"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-piledriver.so",
+            "sha256": "4bdbbeca90cc5b2acb32284b09b6def78546a7d897b8fead87d38a39a52035b1"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-sandybridge.so",
+            "sha256": "9ba32dcb20048f67dc5816646edd64799048bbe2c40deaf7c2cd46a726a99e04"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-sapphirerapids.so",
+            "sha256": "6221b414b195d1d075eb575debb93e24daf26afec7352b136146e650595d3617"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-skylakex.so",
+            "sha256": "211269ef5a067b400c19fb10472e4f4bcecd58b724760d9e4cfa968f4c9a8cdc"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-sse42.so",
+            "sha256": "94ee365a747ce6b81d81e32981f8c1ffa05942f39c245f3e33c05300208d7355"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-x64.so",
+            "sha256": "a31a3e374f01e90ef60dbc8b654be972029107ed5f0c670bb211ed6d6821d490"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-cpu-zen4.so",
+            "sha256": "17dde3b34a68055c2c5f9c6d63a6ca6a9f1b470fdf8869113495af6eaad24f87"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-rpc.so",
+            "sha256": "aff4f89035be449fdc46d56a7e493e9eab4b7dbf09b35b170bf7d36be3709f55"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml-vulkan.so",
+            "sha256": "a32daf6948580e7f34d84d8d17fc5c2eab3ae909875ae453ab323fdbb47966ed"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libggml.so.0.22.0",
+            "sha256": "d0895304483d65cccdb2459af27d020cf2307f0287214df05332172e5d4cb2e0"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-batched-bench-impl.so",
+            "sha256": "f27b0f6ab8ab6a38df2090d7ef831df3bc8aa2647254d8b26ba162b4c8ad896a"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-bench-impl.so",
+            "sha256": "33377ef21504a3c44bd001088b6329a2c774e1280647e60fa717a93f57c990ae"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-cli-impl.so",
+            "sha256": "bbff453f2d0e7743a60f4d8b7ef90fe1b6d205f6a5e4711e413756224a8fbbfd"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-common.so.0.3.0",
+            "sha256": "cdff9a2c2d4f836d61bd5d27b888bd3a42a54641c7e2f37833e862525140b06c"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-completion-impl.so",
+            "sha256": "64a0af28af24c7994601e16ab820b856bf1b9f4fa4f61460a4de511e91479841"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-fit-params-impl.so",
+            "sha256": "7c0729a4f543b1133ca7de715abcbdc8b1e3967f6b3d6ace63fd05fe9770cad2"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-perplexity-impl.so",
+            "sha256": "89e93c4ff8b94056e1d352225e8deaf5d9193eb8337d91209e5b7e41571b19aa"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-quantize-impl.so",
+            "sha256": "a8652485437bf44b5189a5d5e3e208508567fab45b4c4203f9a14e5811adafb4"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama-server-impl.so",
+            "sha256": "da15dd4414628c5941102e288b61c4936458abd366fbdb6245215652c58ef170"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libllama.so.0.3.0",
+            "sha256": "89869a6732162d45aa7fe5ab4b224e484c8f27f58c145e530e99dc59d8772448"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/libmtmd.so.0.3.0",
+            "sha256": "81d3bdb434359a41c75afacc98ea8b3a2be2683b388cbe9694f60e6020158fa8"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama",
+            "sha256": "74e42a1bdeffb6e6dc14af499a1126895373f77e2b07d954c3aaa9dd895e8925"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-batched-bench",
+            "sha256": "3b70e62c5c5cf43c8c436622a845ad4b80c01837d6ba3a10c90e39b219bbd2ab"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-bench",
+            "sha256": "4cbdeae69c0535fd44e89b1515eb0f07f841e307b23b1ca6463306cc0f32e057"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-cli",
+            "sha256": "f0034d9e6959f6c32b40cbb5326f41ccdbac21b77feb27a6f32c0a7465c9ebf7"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-completion",
+            "sha256": "7119bef261611b26f326f7c4da4dc3fdeb7bb28e2faf1ec392bda7b21215ef52"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-fit-params",
+            "sha256": "b2ad073a0c093706e5dfdfe2c9864d199ed921e49ea0383a7d0013e2ad8a81c8"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-gemma3-cli",
+            "sha256": "053ff1b820407b8a1836b0b05d1ffcc91e56b6531f08d9b00b8dfb97a41de294"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-gguf-split",
+            "sha256": "3a995c4d8e0c35ab91a70e96b155d10349d74e6cf8b50346e17887f5a63c348c"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-imatrix",
+            "sha256": "a5a03431b00c48aa2e57aa8e238275d60cbff4a5733eb5562017832d5df9971d"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-llava-cli",
+            "sha256": "053ff1b820407b8a1836b0b05d1ffcc91e56b6531f08d9b00b8dfb97a41de294"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-minicpmv-cli",
+            "sha256": "053ff1b820407b8a1836b0b05d1ffcc91e56b6531f08d9b00b8dfb97a41de294"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-mtmd-cli",
+            "sha256": "5988f5074b01d923f19324b838c7e2dbdfc773209e3b23610cbab2911163d658"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-mtmd-debug",
+            "sha256": "f53566f5f31ebcabafe61c857d7e0249825e3b52aab59be36921a9e026fd82d8"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-perplexity",
+            "sha256": "1c06240ed8594fd377d655aef2dab0865431e3e779c06638474c96b38e6d74a0"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-quantize",
+            "sha256": "0d8c4a6df70bd389cd73669ac9d3e04db59719646cba2e5bf000c4e17080aa23"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-qwen2vl-cli",
+            "sha256": "053ff1b820407b8a1836b0b05d1ffcc91e56b6531f08d9b00b8dfb97a41de294"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-results",
+            "sha256": "7d9b5dd17f7e5611336396ec1c6566d7ecc990d75e8d1b47c2cb4dd21c744890"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-server",
+            "sha256": "082d79df84dfd681a0ecd1a0af744e84b28a797eccb105143a55dd10289204f4"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-tokenize",
+            "sha256": "a9ec13ed59220ecd0feda0a185fa3f1d6679dcdad2b1b05803dee6404cc60c7c"
+          },
+          {
+            "path": "llama-c1d0e7a-vulkan-exclusive-linux-x64/llama-tts",
+            "sha256": "cfdee531b07c34ab60668743e48c7aa8db708494bc23a3be11380dd852dfe64e"
+          }
+        ]
+      },
+      "argv": [
+        "-m",
+        "<model>",
+        "--device",
+        "<device>",
+        "-c",
+        "32768",
+        "-np",
+        "1",
+        "-ngl",
+        "999",
+        "-fa",
+        "on",
+        "--jinja",
+        "--chat-template-kwargs",
+        "{\"enable_thinking\":false}",
+        "--reasoning",
+        "off",
+        "--alias",
+        "<GGUF sha256>",
+        "--api-key-file",
+        "<key>",
+        "--offline",
+        "--no-webui",
+        "--no-warmup",
+        "--host",
+        "<socket>",
+        "-b",
+        "2048",
+        "-ub",
+        "512",
+        "--ctx-checkpoints",
+        "32",
+        "--checkpoint-min-step",
+        "8192",
+        "--cache-ram",
+        "8192",
+        "--cache-reuse",
+        "0",
+        "--no-cache-prompt"
+      ]
+    }
+  ]
+}
