@@ -41,8 +41,8 @@ jobs:
           npm run build
       - name: Set up Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install --no-self-update
+          rustc --version
       - name: Frontend storage recovery regressions
         run: npm run test:frontend
       - name: Check formatting
@@ -57,7 +57,7 @@ jobs:
 
   macos-recovery:
     name: macOS standalone recovery
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     env:
       CARGO_TERM_COLOR: always
@@ -74,8 +74,8 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
       - name: Set up Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
+          rustup toolchain install --no-self-update
+          rustc --version
       - name: Verify native ownership-aware standalone recovery
         working-directory: src-tauri
         run: cargo test --locked --no-default-features --lib connect::provider::tests::connect_owned_provider_remains_available_after_foreground_exit -- --exact
@@ -128,8 +128,8 @@ jobs:
       - name: Set up Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
+          rustup toolchain install --no-self-update
+          rustc --version
       - name: Run native Windows Connect tests
         working-directory: src-tauri
         run: 'cargo test --locked --lib connect::'

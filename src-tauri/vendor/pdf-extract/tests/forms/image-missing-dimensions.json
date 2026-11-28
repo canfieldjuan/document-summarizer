@@ -1,0 +1,18 @@
+{
+  "alias": "image-missing-dimensions",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [],
+      "text": ""
+    }
+  ],
+  "pdf_sha256": "afa47ae2ed84221a1efd360d5ee33c2d3db7d0049be228b7478a8fba2ef35be5"
+}

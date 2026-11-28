@@ -266,6 +266,16 @@ pub struct ParsedDocument {
     pub warnings: Vec<PipelineWarning>,
 }
 
+impl ParsedDocument {
+    pub(crate) fn requires_ocr(&self) -> bool {
+        self.source_type == SourceType::NativeText
+            && self
+                .pages
+                .iter()
+                .any(|page| page.requires_visual_processing)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceType {
     #[default]

@@ -1099,6 +1099,49 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/structured_report.pdf")
     }
 
+    // The report's fifth page is a vector-only figure. Native workflow tests
+    // use its readable pages; OCR tests retain the original mixed document.
+    fn native_workflow_fixture() -> tempfile::NamedTempFile {
+        let mut document = lopdf::Document::load(fixture_path()).unwrap();
+        document.delete_pages(&[5]);
+        let mut fixture = tempfile::Builder::new().suffix(".pdf").tempfile().unwrap();
+        document.save_to(fixture.as_file_mut()).unwrap();
+        fixture
+    }
+
+    #[test]
+    fn workflow_fixtures_have_explicit_native_and_mixed_routing() {
+        let native = native_workflow_fixture();
+        for (path, page_count, visual_pages) in [
+            (fixture_path(), 6, vec![5]),
+            (native.path().to_path_buf(), 5, vec![]),
+        ] {
+            let mut conn = db::init_db(":memory:").unwrap();
+            let (_, run) =
+                crate::pipeline::ingest::ingest_pdf(&mut conn, path.to_str().unwrap()).unwrap();
+            let parsed = crate::pipeline::parser::parse_document(
+                &mut conn,
+                &PdfExtractParser::new(),
+                &run.run_id,
+            )
+            .unwrap();
+            assert_eq!(parsed.pages.len(), page_count);
+            assert_eq!(
+                parsed
+                    .pages
+                    .iter()
+                    .filter(|page| page.requires_visual_processing)
+                    .map(|page| page.page_number)
+                    .collect::<Vec<_>>(),
+                visual_pages,
+            );
+            assert_eq!(
+                crate::connect::ocr_consumer::parsed_document_requires_ocr(&parsed),
+                !visual_pages.is_empty(),
+            );
+        }
+    }
+
     #[test]
     fn desktop_worker_dispatches_ocr_reparse_from_durable_source_type() {
         let database = TestDatabase::new();
@@ -1518,11 +1561,13 @@ mod tests {
 
     #[test]
     fn story_background_run_returns_before_completion_and_persists_after_reopen() {
+        let source = native_workflow_fixture();
         let database = TestDatabase::new();
         let manager = fixture_manager(&database);
         let accepted = manager
             .start_pdf(
-                fixture_path()
+                source
+                    .path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
                 SummaryProfile::Story,
@@ -1610,6 +1655,7 @@ mod tests {
 
     #[test]
     fn new_desktop_worker_binds_the_admitted_run() {
+        let source = native_workflow_fixture();
         let database = TestDatabase::new();
         let observed = Arc::new(StdMutex::new(None));
         let factory_observed = Arc::clone(&observed);
@@ -1625,7 +1671,7 @@ mod tests {
 
         let accepted = manager
             .start_pdf(
-                fixture_path().to_str().unwrap(),
+                source.path().to_str().unwrap(),
                 SummaryProfile::General,
                 None,
             )
@@ -1819,11 +1865,12 @@ mod tests {
 
     #[test]
     fn retry_desktop_worker_binds_the_new_retry_run() {
+        let source = native_workflow_fixture();
         let database = TestDatabase::new();
         let mut conn = db::init_db(&database.0).unwrap();
         let (_, ingested) = crate::pipeline::ingest::ingest_pdf_with_profiles(
             &mut conn,
-            fixture_path().to_str().unwrap(),
+            source.path().to_str().unwrap(),
             None,
             SummaryProfile::General,
             None,
@@ -2012,6 +2059,7 @@ mod tests {
 
     #[test]
     fn cancellation_wins_atomically_during_model_work_and_survives_reopen() {
+        let source = native_workflow_fixture();
         let database = TestDatabase::new();
         let gate = Arc::new(BlockingGate::new());
         let factory_gate = gate.clone();
@@ -2025,7 +2073,8 @@ mod tests {
         );
         let accepted = manager
             .start_pdf(
-                fixture_path()
+                source
+                    .path()
                     .to_str()
                     .expect("fixture path should be UTF-8"),
                 SummaryProfile::General,

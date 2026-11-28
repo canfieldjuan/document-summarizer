@@ -40,7 +40,7 @@ chrono = { version = "0.4.38", features = ["serde"] }
 thiserror = "1.0"
 sha2 = "0.10.8"
 tauri-plugin-dialog = "2"
-pdf-extract = "0.12.0"
+pdf-extract = { version = "=0.12.0", path = "vendor/pdf-extract" }
 lopdf = { version = "0.42", default-features = false }
 flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls-native-roots"] }
@@ -56,6 +56,9 @@ unicode-properties = { version = "=0.1.4", default-features = false, features = 
 unicode-segmentation = "=1.13.3"
 tokenizers = { version = "=0.21.4", default-features = false, features = ["fancy-regex"] }
 tempfile = "3.27"
+
+[patch.crates-io]
+lopdf = { path = "vendor/lopdf" }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

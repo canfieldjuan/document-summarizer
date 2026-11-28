@@ -1,0 +1,67 @@
+{
+  "alias": "base14-ZapfDingbats",
+  "pdf_sha256": "1e786dcc58028164258c5fe59327521bb3c3e84448e3a8c8af4328465bb22eaa",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "ZapfDingbats",
+          "adv": 8.268,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 80.268,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 8.268,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            80.268,
+            720.0
+          ],
+          "fontname": "ZapfDingbats",
+          "adv": 9.432,
+          "upright": true,
+          "x0": 80.268,
+          "y0": 720.0,
+          "x1": 89.7,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 9.432000000000002,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "alias": "base14-conflict-TimesNewRoman,Italic",
+  "pdf_sha256": "7fdf480d80b77736d2a4178ee7a169b2193357c460a6c136ee2ff2e7c197a149",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Times-Italic",
+          "adv": 7.332,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 717.396,
+          "x1": 79.332,
+          "y1": 729.396,
+          "top": 62.60400000000004,
+          "bottom": 74.60400000000004,
+          "doctop": 62.60400000000004,
+          "width": 7.331999999999994,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            79.332,
+            720.0
+          ],
+          "fontname": "Times-Italic",
+          "adv": 7.332,
+          "upright": true,
+          "x0": 79.332,
+          "y0": 717.396,
+          "x1": 86.66399999999999,
+          "y1": 729.396,
+          "top": 62.60400000000004,
+          "bottom": 74.60400000000004,
+          "doctop": 62.60400000000004,
+          "width": 7.331999999999994,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}

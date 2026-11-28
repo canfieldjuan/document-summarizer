@@ -1,0 +1,67 @@
+{
+  "alias": "base14-Symbol",
+  "pdf_sha256": "28cc398ce0b198857a3990dd862e080bd934b5e26d6129cad6540e991a8d471e",
+  "pages": [
+    {
+      "page_number": 1,
+      "bbox": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "rotation": 0,
+      "chars": [
+        {
+          "text": "A",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Symbol",
+          "adv": 0.0,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 72.0,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 0.0,
+          "height": 12.0,
+          "size": 12.0
+        },
+        {
+          "text": "B",
+          "matrix": [
+            1,
+            0,
+            0,
+            1,
+            72.0,
+            720.0
+          ],
+          "fontname": "Symbol",
+          "adv": 0.0,
+          "upright": true,
+          "x0": 72.0,
+          "y0": 720.0,
+          "x1": 72.0,
+          "y1": 732.0,
+          "top": 60.0,
+          "bottom": 72.0,
+          "doctop": 60.0,
+          "width": 0.0,
+          "height": 12.0,
+          "size": 12.0
+        }
+      ],
+      "text": "AB"
+    }
+  ]
+}
