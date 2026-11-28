@@ -13,8 +13,8 @@ handoff, output validation and child admission. Preserve Unix behavior, v3
 preference, provider identity, exact request lineage and retry/capacity policy.
 Unsafe objects remain refused. Do not introduce a second OCR protocol client.
 
-Native regression: start Document OCR's real foreground CLI from
-`38ad9ad6552e74a974f846f3230945fa3bbaf600`, pinned Paddle models and original
+For foreground qualification, start Document OCR's real foreground CLI from
+`523d5857b22ab4a82fa8b475dfd69453a7518688`, pinned Paddle models and original
 CORD fixture. Invoke the production scanned-document handoff on Windows with
 no mock transport or OCR processor; require a derived child, exact qualified
 OCR PDF/text hashes and restart reuse of the same handoff/child. Reproduce the
@@ -22,8 +22,12 @@ current platform refusal first. Commit the test and retain executable/source
 hashes and raw output. This is Juan's second step, not a financial-extraction,
 packaged-provider, summary-model or background proof. No model/prompt changes.
 
-The provider's current private CLI PR remains unmerged pending review, including
-its unexplained initial Linux test stall; this proof does not waive that gate.
+Run the qualification in Document OCR's private Windows CI under its disposable
+standard account. Check out the public consumer at an immutable commit, compile
+its native Rust test executable and run it against the foreground provider.
+Use the provider's qualified serving baseline for the original scan. Verify
+both saved files by byte count and SHA-256, then require recovery to reuse the
+same child and provider job. Keep the provider log in the private run.
 
 ## Evidence-led correction
 
@@ -38,7 +42,10 @@ counts all directory children before probing, admitting at most 256 per protocol
 and only JSON candidates. Regression covers private inherited files, unsafe
 ACLs/reparse ancestry, exact byte and traversal bounds, and the real publisher.
 
-## Native result and reproduction
+## Historical native result and reproduction
+
+The following results used provider `38ad9ad6552e74a974f846f3230945fa3bbaf600`.
+The current provider revision requires its own native run.
 
 Both original platform refusals were reproduced in the actual Windows handoff:
 first discovery, then recovery after real Paddle output retrieval. The final
@@ -83,7 +90,7 @@ CI and merge remain NOT DONE. Durable evidence alias:
 `windows-ocr-consumer-evidence-v1.zip` (digest posted with the PR).
 
 
-## Review reconciliation (2026-10-21)
+## Historical review reconciliation (2026-10-21)
 
 Preserve Unix's existing `InvalidOutput` assertion in snapshot failure; only
 Windows may report its native `Io` refusal. The real-provider test must call

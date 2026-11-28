@@ -130,44 +130,6 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
-      - name: Check out the qualified foreground OCR provider
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: canfieldjuan/document-ocr
-          ref: 523d5857b22ab4a82fa8b475dfd69453a7518688
-          path: ocr-provider
-          persist-credentials: false
-      - name: Set up the OCR dependency installer
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
-        with:
-          version: "0.10.10"
-      - name: Prepare the pinned OCR runtime and models
-        working-directory: ocr-provider
-        shell: pwsh
-        env:
-          UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/ocr-provider/.ci-python
-          DOCUMENT_OCR_PADDLE_MODELS_ROOT: ${{ github.workspace }}/ocr-provider/.ci-models
-        run: |
-          uv sync --frozen --managed-python --python 3.13
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run --no-sync python scripts/prepare_paddle_runtime.py
-      - name: Build the production consumer test executable
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          $messages = cargo test --locked --lib --no-run --message-format=json-render-diagnostics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $executables = @($messages | ConvertFrom-Json | Where-Object {
-            $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable
-          })
-          if ($executables.Count -ne 1) { throw "Expected one consumer test executable, got $($executables.Count)" }
-          Copy-Item -LiteralPath $executables[0].executable -Destination ../ocr-provider/consumer-test.exe
-      - name: Consume and recover a real foreground OCR scan
-        shell: powershell
-        working-directory: ocr-provider
-        env:
-          DOCUMENT_OCR_FIXTURE_RUNNER: ${{ runner.environment }}
-        run: ./scripts/test_windows_profile.ps1 ../scripts/qualify_windows_ocr_consumer.py
       - name: Run native Windows Connect tests
         working-directory: src-tauri
         run: 'cargo test --locked --lib connect::'
